@@ -14,6 +14,6 @@ A desktop inventory management application built with **Python**, **PyQt5**, and
 
 ### Offline Installation
 If deploying in an environment without internet access:
-1. Download Microsoft SQL Server Express manually from Microsoft.
-2. Place the installer executable or extracted folder into the `installers/` directory.
-3. Run `main.exe` or `python main.py` to initiate database setup.
+1. Install the Microsoft ODBC Driver (`installers/msodbcsql17.msi` or `18.msi`).
+2. Install Microsoft SQL Server Express (`installers/SQLEXPR_x64_ENU.exe`).
+3. Run `main.exe` or `python main.py` to start the application.
