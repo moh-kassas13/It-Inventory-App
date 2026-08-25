@@ -5,7 +5,38 @@ import csv
 import re
 import webbrowser
 from datetime import datetime, date
+import ctypes
+import sys
+import time
+import pyodbc
 
+def connect_with_retry(max_retries=5, delay=3):
+    """
+    Attempts to connect to SQL Server. 
+    Retries up to 5 times with a 3-second delay to allow the background service to start.
+    """
+    conn_str = (
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        "SERVER=.\\SQLEXPRESS;"
+        "DATABASE=master;"  # or WarehouseDB
+        "Trusted_Connection=yes;"
+    )
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Set a low connection timeout per attempt
+            connection = pyodbc.connect(conn_str, timeout=5)
+            return connection
+        except pyodbc.Error as e:
+            if attempt < max_retries:
+                time.sleep(delay)
+            else:
+                raise e  # Fail gracefully after all retries are exhausted
+# Force Windows to assign custom taskbar and title bar icons
+if sys.platform == 'win32':
+    myappid = 'itwarehouse.inventorydesk.app.1.0' 
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton, QLabel,
