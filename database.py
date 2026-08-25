@@ -138,6 +138,8 @@ def init_db():
             DeviceName VARCHAR(100),
             DeviceType VARCHAR(50),
             Quantity INT,
+            UnitPrice DECIMAL(18, 2) DEFAULT 0.00,
+            TotalPrice DECIMAL(18, 2) DEFAULT 0.00,
             Barcode VARCHAR(100),
             SerialNumber VARCHAR(100),
             HostName VARCHAR(100),
@@ -162,14 +164,25 @@ def init_db():
         )
     """)
 
-    # Automatic Migration: Adds missing history columns to existing table
-    columns = [
+    # Automatic Migration: Adds missing price columns to existing Inventory table
+    inventory_columns = [
+        ("UnitPrice", "DECIMAL(18, 2) DEFAULT 0.00"),
+        ("TotalPrice", "DECIMAL(18, 2) DEFAULT 0.00")
+    ]
+    for col, col_type in inventory_columns:
+        cursor.execute(f"""
+            IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('Inventory') AND name = '{col}')
+            ALTER TABLE Inventory ADD {col} {col_type}
+        """)
+
+    # Automatic Migration: Adds missing history columns to existing AuditLogs table
+    audit_columns = [
         ("Sender", "VARCHAR(100)"),
         ("WarrantyDate", "VARCHAR(50)"),
         ("TicketNumber", "VARCHAR(100)"),
         ("FromWhere", "VARCHAR(100)")
     ]
-    for col, col_type in columns:
+    for col, col_type in audit_columns:
         cursor.execute(f"""
             IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('AuditLogs') AND name = '{col}')
             ALTER TABLE AuditLogs ADD {col} {col_type}

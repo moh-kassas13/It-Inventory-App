@@ -9,6 +9,7 @@ import ctypes
 import sys
 import time
 import pyodbc
+from dialogs import ExportDialog
 
 def connect_with_retry(max_retries=5, delay=3):
     """
@@ -52,7 +53,7 @@ from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPageSetupDialog
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from database import init_db, connect_db, log_audit
+from database import get_resource_path, init_db, connect_db, log_audit
 from auth import LoginDialog, find_logo_path
 from dialogs import StockInDialog, StockOutDialog
 
@@ -60,19 +61,72 @@ from dialogs import StockInDialog, StockOutDialog
 myappid = 'aubmc.itwarehouse.app.3.0'
 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
+def export_to_csv(self):
+    dialog = ExportDialog(username=self.username, parent=self)
+    
+    # Check if the user clicked "Export CSV" (QDialog.Accepted)
+    if dialog.exec_() == QDialog.Accepted:
+        selected_table = dialog.cbo_table.currentText()
+        
+        # 1. Open system file picker window
+        default_name = f"{selected_table.lower().replace(' ', '_')}_export.csv"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save CSV File", 
+            default_name, 
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        # If user cancels the file dialog, stop execution
+        if not file_path:
+            return
 
-# ==========================================
-# EXPORT DIALOG
-# ==========================================
-class ExportDialog(QDialog):
-    def __init__(self, username, parent=None):
-        super().__init__(parent)
-        self.username = username
-        self.setWindowTitle("Export Inventory Data")
-        self.setMinimumWidth(480)
-        self.setStyleSheet("QDialog { background-color: #FFFFFF; }")
-        self._init_ui()
-        self._populate_device_types()
+        # 2. Query database and write to CSV
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            
+            # Map selection to database table
+            db_table = "Inventory" if selected_table == "Inventory" else "AuditLog"
+            cursor.execute(f"SELECT * FROM {db_table}")
+            
+            rows = cursor.fetchall()
+            headers = [column[0] for column in cursor.description]
+            conn.close()
+
+            # Write data rows to file
+            with open(file_path, mode='w', newline='', encoding='utf-8') as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(headers)
+                writer.writerows(rows)
+
+            QMessageBox.information(
+                self, 
+                "Export Successful", 
+                f"Data successfully exported to:\n{file_path}"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, 
+                "Export Error", 
+                f"Failed to export data to CSV:\n{e}"
+            )
+
+
+def _add_new_device_name(self):
+    """Prompt user to add a new device name dynamically."""
+    from PyQt5.QtWidgets import QInputDialog, QMessageBox
+
+    text, ok = QInputDialog.getText(self, "Add Device Name", "Enter new Device Name:")
+    if ok and text.strip():
+        new_name = text.strip()
+        index = self.cbo_device_name.findText(new_name, Qt.MatchExactly)
+        if index < 0:
+            self.cbo_device_name.addItem(new_name)
+            self.cbo_device_name.setCurrentText(new_name)
+        else:
+            self.cbo_device_name.setCurrentIndex(index)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -112,11 +166,34 @@ class ExportDialog(QDialog):
         filter_layout = QFormLayout(self.filter_box)
         filter_layout.setSpacing(10)
 
-        # 1. Device Name
-        self.input_device_name = QLineEdit()
-        self.input_device_name.setPlaceholderText("Filter by Name (e.g. Laptop, Dell)...")
-        self.input_device_name.setStyleSheet("padding: 6px; border: 1px solid #D0D5DD; border-radius: 4px; background: white;")
-        filter_layout.addRow(QLabel("Device Name:"), self.input_device_name)
+        # 1. Device Name (Dropdown + Add Button)
+        dev_name_layout = QHBoxLayout()
+        dev_name_layout.setSpacing(6)
+
+        self.cbo_device_name = QComboBox()
+        self.cbo_device_name.setStyleSheet("padding: 6px; border: 1px solid #D0D5DD; border-radius: 4px; background: white;")
+        self._populate_device_names()  # Populates existing names from DB
+
+        btn_add_device_name = QPushButton("+")
+        btn_add_device_name.setFixedWidth(32)
+        btn_add_device_name.setToolTip("Add new Device Name")
+        btn_add_device_name.setStyleSheet("""
+            QPushButton {
+                background-color: #1F2D3D; 
+                color: white; 
+                font-weight: bold; 
+                font-size: 14px; 
+                border-radius: 4px; 
+                padding: 4px;
+            }
+            QPushButton:hover { background-color: #34495E; }
+        """)
+        btn_add_device_name.clicked.connect(self._add_new_device_name)
+
+        dev_name_layout.addWidget(self.cbo_device_name, stretch=1)
+        dev_name_layout.addWidget(btn_add_device_name)
+
+        filter_layout.addRow(QLabel("Device Name:"), dev_name_layout)
 
         # 2. Device Type
         self.combo_device_type = QComboBox()
@@ -320,7 +397,7 @@ class UserManagementDialog(QDialog):
         self.input_pass.setStyleSheet("padding: 6px; border: 1px solid #D0D5DD; border-radius: 4px; background: white;")
 
         self.combo_role = QComboBox()
-        self.combo_role.addItems(["Admin", "User", "Operator"])
+        self.combo_role.addItems(["Admin", "User"])
         self.combo_role.setStyleSheet("padding: 6px; border: 1px solid #D0D5DD; border-radius: 4px; background: white;")
 
         btn_add = QPushButton("Add User")
@@ -1421,9 +1498,77 @@ class MainWindow(QMainWindow):
         return frame
 
     def refresh_all_data(self):
-        self.load_dashboard_data()
-        self.load_inventory_data()
-        self.load_history_data()
+        """Refreshes KPI statistics, charts, and table views across all dashboard tabs."""
+        conn = None
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+
+            # 1. Update KPI Cards
+            cursor.execute("SELECT ISNULL(SUM(Quantity), 0), COUNT(*) FROM Inventory")
+            total_units, total_lines = cursor.fetchone()
+
+            cursor.execute("SELECT COUNT(*) FROM AuditLogs")
+            total_trans = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM Inventory WHERE Quantity <= 3")
+            low_stock = cursor.fetchone()[0]
+
+            self.kpi_units.findChildren(QLabel)[1].setText(str(total_units))
+            self.kpi_lines.findChildren(QLabel)[1].setText(str(total_lines))
+            self.kpi_trans.findChildren(QLabel)[1].setText(str(total_trans))
+            self.kpi_low.findChildren(QLabel)[1].setText(str(low_stock))
+
+            # 2. Update Charts
+            cursor.execute("SELECT DeviceName, SUM(Quantity) FROM Inventory GROUP BY DeviceName")
+            name_data = {row[0]: row[1] for row in cursor.fetchall() if row[0]}
+            self.chart_names.update_chart(name_data)
+
+            cursor.execute("SELECT DeviceType, SUM(Quantity) FROM Inventory GROUP BY DeviceType")
+            type_data = {row[0]: row[1] for row in cursor.fetchall() if row[0]}
+            self.chart_types.update_chart(type_data)
+
+            # 3. Populate Dashboard Recent Inventory Table (ORDER BY 1 sorts by 1st column)
+            cursor.execute("SELECT TOP 10 * FROM Inventory ORDER BY 1 DESC")
+            dash_rows = cursor.fetchall()
+            dash_cols = [col[0] for col in cursor.description] if cursor.description else []
+            self.dash_table.setColumnCount(len(dash_cols))
+            self.dash_table.setHorizontalHeaderLabels([self._format_key_name_helper(c) for c in dash_cols])
+            self.dash_table.setRowCount(len(dash_rows))
+            for r_idx, r_data in enumerate(dash_rows):
+                for c_idx, val in enumerate(r_data):
+                    val_str = f"#{val}" if c_idx == 0 else self.format_value_clean(val)
+                    self.dash_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
+
+            # 4. Populate Full Inventory Table
+            cursor.execute("SELECT * FROM Inventory ORDER BY 1 DESC")
+            inv_rows = cursor.fetchall()
+            col_names = [col[0] for col in cursor.description] if cursor.description else []
+            self.inventory_table.setColumnCount(len(col_names))
+            self.inventory_table.setHorizontalHeaderLabels([self._format_key_name_helper(c) for c in col_names])
+            self.inventory_table.setRowCount(len(inv_rows))
+            for r_idx, r_data in enumerate(inv_rows):
+                for c_idx, val in enumerate(r_data):
+                    val_str = f"#{val}" if c_idx == 0 else self.format_value_clean(val)
+                    self.inventory_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
+
+            # 5. Populate History & Audit Table
+            cursor.execute("SELECT * FROM AuditLogs ORDER BY 1 DESC")
+            hist_rows = cursor.fetchall()
+            hist_cols = [col[0] for col in cursor.description] if cursor.description else []
+            self.history_table.setColumnCount(len(hist_cols))
+            self.history_table.setHorizontalHeaderLabels([self._format_key_name_helper(c) for c in hist_cols])
+            self.history_table.setRowCount(len(hist_rows))
+            for r_idx, r_data in enumerate(hist_rows):
+                for c_idx, val in enumerate(r_data):
+                    val_str = f"#{val}" if c_idx == 0 else self.format_value_clean(val)
+                    self.history_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
+
+        except Exception as e:
+            QMessageBox.critical(self, "Data Refresh Error", f"Failed to refresh data from SQL database:\n{e}")
+        finally:
+            if conn:
+                conn.close()
 
     def format_value_clean(self, value):
         if value is None or str(value).strip() in ("", "None"):
@@ -1592,14 +1737,28 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    # 1. Force Windows to display your custom icon on taskbar & title bar
+    if sys.platform == 'win32':
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('itwarehouse.inventorydesk.1.0')
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     
+    # 2. Apply custom logo icon globally (all dialogs and main window inherit this)
+    icon_path = get_resource_path("assets/logo.png")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
+    # 3. Initialize Database & Automatic Table/Column Migrations
     try:
         init_db()
     except Exception as e:
         QMessageBox.critical(None, "Startup Error", f"Failed to connect to database:\n{e}")
         sys.exit(1)
 
+    # 4. Launch Application Flow
     login = LoginDialog()
     if login.exec_() == QDialog.Accepted:
         main_win = MainWindow(username=login.username, user_role=login.user_role)

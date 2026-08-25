@@ -1,12 +1,307 @@
 import os
+import csv
 from datetime import datetime
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QDialog, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QSpinBox, QDateEdit, QDateTimeEdit, QTextEdit, QPushButton,
-    QMessageBox, QFormLayout, QScrollArea, QWidget, QComboBox
+    QMessageBox, QFormLayout, QScrollArea, QWidget, QComboBox, QInputDialog, QFileDialog
 )
-from PyQt5.QtCore import Qt, QDate, QDateTime
+from PyQt5.QtCore import QCoreApplication, Qt, QDate, QDateTime, QEvent, QPoint
+from PyQt5.QtGui import QFont, QMouseEvent
 from database import connect_db, log_audit
+
+
+class BlankDateEdit(QDateEdit):
+    """QDateEdit that stays blank by default, auto-fills Today on click/focus, and clears on Backspace/Delete."""
+    def __init__(self, parent=None):
+        self._has_value = False
+        super().__init__(parent)
+        self.setDisplayFormat("yyyy-MM-dd")
+        self.setCalendarPopup(True)
+        self.setSpecialValueText(" ")  # Keeps input visually blank initially
+        self.setDate(self.minimumDate())
+
+        self.dateChanged.connect(self._on_date_changed)
+        self.lineEdit().installEventFilter(self)
+
+    def _on_date_changed(self, date):
+        if date != self.minimumDate():
+            self._has_value = True
+
+    def textFromDateTime(self, dateTime):
+        """Prevents Qt from displaying 1753-09-14 under any circumstances while blank."""
+        if not getattr(self, '_has_value', False) or dateTime.date() == self.minimumDate():
+            return ""
+        return super().textFromDateTime(dateTime)
+
+    def focusInEvent(self, event):
+        """Auto-fills today's date immediately upon getting focus."""
+        if not getattr(self, '_has_value', False) or self.date() == self.minimumDate():
+            self._set_to_today()
+        super().focusInEvent(event)
+
+    def mousePressEvent(self, event):
+        """Auto-fills today's date immediately upon mouse click."""
+        if not getattr(self, '_has_value', False) or self.date() == self.minimumDate():
+            self._set_to_today()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        """Pressing Backspace or Delete resets the field back to blank."""
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._has_value = False
+            self.setDate(self.minimumDate())
+            self.lineEdit().setText("")
+            return
+        else:
+            self._has_value = True
+        super().keyPressEvent(event)
+
+    def _set_to_today(self):
+        today = QDate.currentDate()
+        self._has_value = True
+        self.setDate(today)
+        cal = self.calendarWidget()
+        if cal:
+            cal.setCurrentPage(today.year(), today.month())
+            cal.setSelectedDate(today)
+
+    def eventFilter(self, obj, event):
+        if obj == self.lineEdit():
+            if event.type() in (QEvent.MouseButtonPress, QEvent.FocusIn):
+                if not getattr(self, '_has_value', False) or self.date() == self.minimumDate():
+                    self._set_to_today()
+
+            elif event.type() == QEvent.MouseButtonDblClick:
+                self._set_to_today()
+                self.lineEdit().deselect()
+
+                arrow_pos = QPoint(self.width() - 10, self.height() // 2)
+                press = QMouseEvent(QEvent.MouseButtonPress, arrow_pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+                release = QMouseEvent(QEvent.MouseButtonRelease, arrow_pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+                
+                QCoreApplication.postEvent(self, press)
+                QCoreApplication.postEvent(self, release)
+                return True
+
+        return super().eventFilter(obj, event)
+
+    def is_blank(self):
+        """Returns True if the user left the field blank."""
+        return not getattr(self, '_has_value', False) or self.date() == self.minimumDate()
+
+
+# ==========================================
+# EXPORT DIALOG
+# ==========================================
+import pyodbc
+
+class ExportDialog(QDialog):
+    def __init__(self, username="System", parent=None):
+        super().__init__(parent)
+        self.username = username
+        self.setWindowTitle("Export Data to CSV")
+        self.resize(340, 160)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+
+        # Set standard system font matching Import dialogs
+        app_font = QFont("Segoe UI", 9)
+        self.setFont(app_font)
+
+        # Clean stylesheet: resets font-weight to normal and uses standard system buttons
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #f8f9fa;
+            }
+            QLabel {
+                color: #000000;
+                font-size: 12px;
+                font-weight: normal;
+            }
+            QComboBox {
+                background-color: #ffffff;
+                border: 1px solid #ababab;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 12px;
+                color: #000000;
+            }
+            QComboBox:hover, QComboBox:focus {
+                border-color: #0078d7;
+            }
+            QPushButton {
+                background-color: #ffffff;
+                color: #000000;
+                border: 1px solid #ababab;
+                border-radius: 4px;
+                padding: 5px 14px;
+                font-size: 12px;
+                font-weight: normal;
+            }
+            QPushButton:hover {
+                background-color: #e5f1fb;
+                border-color: #0078d7;
+            }
+            QPushButton:pressed {
+                background-color: #cce4f7;
+            }
+        """)
+
+        # Main Layout
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+
+        lbl_title = QLabel("Select Dataset to Export:", self)
+        layout.addWidget(lbl_title)
+
+        self.combo_dataset = QComboBox(self)
+        self.combo_dataset.addItems(["Inventory", "Audit Logs"])
+        layout.addWidget(self.combo_dataset)
+
+        layout.addStretch()
+
+        # Action Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        self.btn_cancel = QPushButton("Cancel", self)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        self.btn_export = QPushButton("Export CSV", self)
+        self.btn_export.clicked.connect(self.export_data)
+
+        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_export)
+
+        layout.addLayout(btn_layout)
+
+    def export_data(self):
+        dataset_choice = self.combo_dataset.currentText().strip()
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save CSV File", 
+            f"{dataset_choice.lower().replace(' ', '_')}_export.csv", 
+            "CSV Files (*.csv)"
+        )
+
+        if not file_path:
+            return
+
+        if dataset_choice == "Inventory":
+            query = "SELECT * FROM Inventory"
+        elif dataset_choice == "Audit Logs":
+            query = "SELECT * FROM AuditLogs"
+        else:
+            QMessageBox.warning(self, "Export Error", f"Unknown dataset option: {dataset_choice}")
+            return
+
+        conn = None
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute(query)
+
+            rows = cursor.fetchall()
+            headers = [column[0] for column in cursor.description] if cursor.description else []
+
+            with open(file_path, mode='w', newline='', encoding='utf-8-sig') as file:
+                writer = csv.writer(file)
+                writer.writerow(headers)
+                for row in rows:
+                    writer.writerow([str(val) if val is not None else "" for val in row])
+
+            # Reset child message box style to clean system default font
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("Export Success")
+            msg_box.setText(f"Data successfully exported to:\n{file_path}")
+            msg_box.setStyleSheet("QLabel { font-weight: normal; font-size: 12px; }")
+            msg_box.exec_()
+
+            self.accept()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"An error occurred while exporting:\n{e}")
+        finally:
+            if conn:
+                conn.close()
+
+        # Main Layout Construction
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        lbl_title = QLabel("Select Dataset to Export:", self)
+        layout.addWidget(lbl_title)
+
+        self.combo_dataset = QComboBox(self)
+        self.combo_dataset.addItems(["Inventory", "Audit Logs"])
+        layout.addWidget(self.combo_dataset)
+
+        layout.addStretch()
+
+        # Action Button Row
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        self.btn_cancel = QPushButton("Cancel", self)
+        self.btn_cancel.setObjectName("btnCancel")
+        self.btn_cancel.clicked.connect(self.reject)
+
+        self.btn_export = QPushButton("Export CSV", self)
+        self.btn_export.clicked.connect(self.export_data)
+
+        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_export)
+
+        layout.addLayout(btn_layout)
+
+    def export_data(self):
+        dataset_choice = self.combo_dataset.currentText().strip()
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Save CSV File", 
+            f"{dataset_choice.lower().replace(' ', '_')}_export.csv", 
+            "CSV Files (*.csv)"
+        )
+
+        if not file_path:
+            return
+
+        if dataset_choice == "Inventory":
+            query = "SELECT * FROM Inventory"
+        elif dataset_choice == "Audit Logs":
+            query = "SELECT * FROM AuditLogs"
+        else:
+            QMessageBox.warning(self, "Export Error", f"Unknown dataset option: {dataset_choice}")
+            return
+
+        conn = None
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute(query)
+
+            rows = cursor.fetchall()
+            headers = [column[0] for column in cursor.description] if cursor.description else []
+
+            with open(file_path, mode='w', newline='', encoding='utf-8-sig') as file:
+                writer = csv.writer(file)
+                writer.writerow(headers)
+                for row in rows:
+                    writer.writerow([str(val) if val is not None else "" for val in row])
+
+            QMessageBox.information(self, "Export Success", f"Data successfully exported to:\n{file_path}")
+            self.accept()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"An error occurred while exporting:\n{e}")
+        finally:
+            if conn:
+                conn.close()
 
 
 # ==========================================
@@ -21,7 +316,7 @@ class StockInDialog(QDialog):
         super().__init__(parent)
         self.username = username
         self.setWindowTitle("Stock In - Inbound Transaction")
-        self.resize(540, 750)
+        self.resize(560, 780)
         self.setStyleSheet("QDialog { background-color: #FFFFFF; }")
         self._init_ui()
 
@@ -38,21 +333,86 @@ class StockInDialog(QDialog):
         form_layout.setSpacing(12)
         form_layout.setLabelAlignment(Qt.AlignRight)
 
-        # 1. Device Name *
-        self.txt_dev_name = QLineEdit()
-        self.txt_dev_name.setPlaceholderText("e.g. ThinkPad X1 Carbon, Dell Latitude")
-        self._style_input(self.txt_dev_name)
+        btn_add_style = """
+            QPushButton {
+                background-color: #1F2D3D; 
+                color: white; 
+                font-weight: bold; 
+                font-size: 14px; 
+                border-radius: 4px; 
+                padding: 4px;
+            }
+            QPushButton:hover { background-color: #34495E; }
+        """
 
-        # 2. Device Type *
-        self.txt_dev_type = QLineEdit()
-        self.txt_dev_type.setPlaceholderText("e.g. Laptop, Monitor, Adapter, Printer")
-        self._style_input(self.txt_dev_type)
+        btn_del_style = """
+            QPushButton {
+                background-color: #EF4444; 
+                color: white; 
+                font-weight: bold; 
+                font-size: 14px; 
+                border-radius: 4px; 
+                padding: 4px;
+            }
+            QPushButton:hover { background-color: #DC2626; }
+        """
+
+        # 1. Device Name * (Dropdown + Add & Delete Buttons)
+        dev_name_layout = QHBoxLayout()
+        dev_name_layout.setSpacing(6)
+
+        self.cbo_dev_name = QComboBox()
+        self._style_input(self.cbo_dev_name)
+
+        btn_add_dev_name = QPushButton("+")
+        btn_add_dev_name.setFixedWidth(30)
+        btn_add_dev_name.setToolTip("Add new Device Name")
+        btn_add_dev_name.setStyleSheet(btn_add_style)
+        btn_add_dev_name.clicked.connect(self._add_new_device_name)
+
+        btn_del_dev_name = QPushButton("-")
+        btn_del_dev_name.setFixedWidth(30)
+        btn_del_dev_name.setToolTip("Remove selected Device Name from options")
+        btn_del_dev_name.setStyleSheet(btn_del_style)
+        btn_del_dev_name.clicked.connect(self._delete_device_name)
+
+        dev_name_layout.addWidget(self.cbo_dev_name, stretch=1)
+        dev_name_layout.addWidget(btn_add_dev_name)
+        dev_name_layout.addWidget(btn_del_dev_name)
+
+        self._populate_device_names()
+
+        # 2. Device Type * (Dropdown + Add & Delete Buttons)
+        dev_type_layout = QHBoxLayout()
+        dev_type_layout.setSpacing(6)
+
+        self.cbo_dev_type = QComboBox()
+        self._style_input(self.cbo_dev_type)
+
+        btn_add_dev_type = QPushButton("+")
+        btn_add_dev_type.setFixedWidth(30)
+        btn_add_dev_type.setToolTip("Add new Device Type")
+        btn_add_dev_type.setStyleSheet(btn_add_style)
+        btn_add_dev_type.clicked.connect(self._add_new_device_type)
+
+        btn_del_dev_type = QPushButton("-")
+        btn_del_dev_type.setFixedWidth(30)
+        btn_del_dev_type.setToolTip("Remove selected Device Type from options")
+        btn_del_dev_type.setStyleSheet(btn_del_style)
+        btn_del_dev_type.clicked.connect(self._delete_device_type)
+
+        dev_type_layout.addWidget(self.cbo_dev_type, stretch=1)
+        dev_type_layout.addWidget(btn_add_dev_type)
+        dev_type_layout.addWidget(btn_del_dev_type)
+
+        self._populate_device_types()
 
         # 3. Quantity *
         self.spn_quantity = QSpinBox()
         self.spn_quantity.setRange(1, 10000)
         self.spn_quantity.setValue(1)
         self._style_input(self.spn_quantity)
+        self.spn_quantity.valueChanged.connect(self._update_total_price)
 
         # 4. Sender *
         self.txt_sender = QLineEdit()
@@ -71,11 +431,8 @@ class StockInDialog(QDialog):
         self.dt_receive_datetime.setCalendarPopup(True)
         self._style_input(self.dt_receive_datetime)
 
-        # 7. Warranty Date
-        self.dt_warranty_date = QDateEdit()
-        self.dt_warranty_date.setDate(QDate.currentDate().addYears(1))
-        self.dt_warranty_date.setDisplayFormat("yyyy-MM-dd")
-        self.dt_warranty_date.setCalendarPopup(True)
+        # 7. Warranty Date (Blank by default)
+        self.dt_warranty_date = BlankDateEdit()
         self._style_input(self.dt_warranty_date)
 
         # 8. Barcode Number *
@@ -103,15 +460,31 @@ class StockInDialog(QDialog):
         self.txt_hostname.setPlaceholderText("Network or workstation hostname")
         self._style_input(self.txt_hostname)
 
-        # 13. Notes
+        # 13. Unit Price
+        self.spn_unit_price = QDoubleSpinBox()
+        self.spn_unit_price.setRange(0.00, 999999.99)
+        self.spn_unit_price.setDecimals(2)
+        self.spn_unit_price.setPrefix("$ ")
+        self._style_input(self.spn_unit_price)
+        self.spn_unit_price.valueChanged.connect(self._update_total_price)
+
+        # 14. Total Price (Auto-calculated, Read-only)
+        self.spn_total_price = QDoubleSpinBox()
+        self.spn_total_price.setRange(0.00, 99999999.99)
+        self.spn_total_price.setDecimals(2)
+        self.spn_total_price.setPrefix("$ ")
+        self.spn_total_price.setReadOnly(True)
+        self.spn_total_price.setStyleSheet("border: 1px solid #D0D5DD; border-radius: 4px; padding: 6px; font-size: 12px; background: #F4F4F5;")
+
+        # 15. Notes
         self.txt_notes = QTextEdit()
         self.txt_notes.setPlaceholderText("Condition remarks, batch details, extra context...")
         self.txt_notes.setFixedHeight(70)
         self.txt_notes.setStyleSheet("border: 1px solid #D0D5DD; border-radius: 4px; padding: 6px; font-size: 12px;")
 
         # Form Layout Setup
-        form_layout.addRow(self._make_label("Device Name *"), self.txt_dev_name)
-        form_layout.addRow(self._make_label("Device Type *"), self.txt_dev_type)
+        form_layout.addRow(self._make_label("Device Name *"), dev_name_layout)
+        form_layout.addRow(self._make_label("Device Type *"), dev_type_layout)
         form_layout.addRow(self._make_label("Quantity *"), self.spn_quantity)
         form_layout.addRow(self._make_label("Sender *"), self.txt_sender)
         form_layout.addRow(self._make_label("Receiver *"), self.txt_receiver)
@@ -122,6 +495,8 @@ class StockInDialog(QDialog):
         form_layout.addRow(self._make_label("From Where"), self.txt_from_where)
         form_layout.addRow(self._make_label("Serial Number"), self.txt_serial_num)
         form_layout.addRow(self._make_label("Host Name"), self.txt_hostname)
+        form_layout.addRow(self._make_label("Price Per Unit"), self.spn_unit_price)
+        form_layout.addRow(self._make_label("Total Price"), self.spn_total_price)
         form_layout.addRow(self._make_label("Notes"), self.txt_notes)
 
         scroll.setWidget(container)
@@ -151,14 +526,178 @@ class StockInDialog(QDialog):
     def _style_input(self, widget):
         widget.setStyleSheet("border: 1px solid #D0D5DD; border-radius: 4px; padding: 6px; font-size: 12px; background: white;")
 
+    def _update_total_price(self):
+        """Calculates total price based on quantity and unit price."""
+        qty = self.spn_quantity.value()
+        unit_price = self.spn_unit_price.value()
+        self.spn_total_price.setValue(qty * unit_price)
+
+    # --- DEVICE NAME HELPER METHODS ---
+    def _populate_device_names(self):
+        """Fetch distinct device names from database and populate dropdown."""
+        self.cbo_dev_name.clear()
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT DeviceName 
+                FROM Inventory 
+                WHERE DeviceName IS NOT NULL AND DeviceName <> '' 
+                ORDER BY DeviceName
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+
+            for row in rows:
+                self.cbo_dev_name.addItem(row[0])
+
+            self.cbo_dev_name.setCurrentIndex(-1)
+        except Exception as e:
+            print(f"Failed to load device names: {e}")
+
+    def _add_new_device_name(self):
+        """Prompt user to add a new device name dynamically."""
+        text, ok = QInputDialog.getText(self, "Add Device Name", "Enter new Device Name:")
+        if ok and text.strip():
+            new_name = text.strip()
+            index = self.cbo_dev_name.findText(new_name, Qt.MatchExactly)
+            if index < 0:
+                self.cbo_dev_name.addItem(new_name)
+                self.cbo_dev_name.setCurrentText(new_name)
+            else:
+                self.cbo_dev_name.setCurrentIndex(index)
+
+    def _delete_device_name(self):
+        """Remove selected device name or prompt user to choose one if blank."""
+        items = [self.cbo_dev_name.itemText(i) for i in range(self.cbo_dev_name.count()) if self.cbo_dev_name.itemText(i).strip()]
+        if not items:
+            QMessageBox.warning(self, "Warning", "No Device Names available to remove.")
+            return
+
+        current_text = self.cbo_dev_name.currentText().strip()
+        if not current_text or current_text not in items:
+            item, ok = QInputDialog.getItem(self, "Remove Device Name", "Select Device Name to remove:", items, 0, False)
+            if ok and item:
+                current_text = item
+            else:
+                return
+
+        reply = QMessageBox.question(
+            self,
+            "Remove Option",
+            f"Are you sure you want to remove '{current_text}'?\n\n"
+            f"(This will remove it from the list and clear it from existing records so it won't reappear.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            idx = self.cbo_dev_name.findText(current_text, Qt.MatchExactly)
+            if idx >= 0:
+                self.cbo_dev_name.removeItem(idx)
+            self.cbo_dev_name.setCurrentIndex(-1)
+
+            # Clear from DB so it doesn't reload in Stock In or Stock Out
+            try:
+                conn = connect_db()
+                cursor = conn.cursor()
+                cursor.execute("UPDATE Inventory SET DeviceName = '' WHERE DeviceName = ?", (current_text,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Database error clearing DeviceName: {e}")
+
+    # --- DEVICE TYPE HELPER METHODS ---
+    def _populate_device_types(self):
+        """Fetch distinct device types from database and populate dropdown."""
+        self.cbo_dev_type.clear()
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT DeviceType 
+                FROM Inventory 
+                WHERE DeviceType IS NOT NULL AND DeviceType <> '' 
+                ORDER BY DeviceType
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+
+            for row in rows:
+                self.cbo_dev_type.addItem(row[0])
+
+            self.cbo_dev_type.setCurrentIndex(-1)
+        except Exception as e:
+            print(f"Failed to load device types: {e}")
+
+    def _add_new_device_type(self):
+        """Prompt user to add a new device type dynamically."""
+        text, ok = QInputDialog.getText(self, "Add Device Type", "Enter new Device Type:")
+        if ok and text.strip():
+            new_type = text.strip()
+            index = self.cbo_dev_type.findText(new_type, Qt.MatchExactly)
+            if index < 0:
+                self.cbo_dev_type.addItem(new_type)
+                self.cbo_dev_type.setCurrentText(new_type)
+            else:
+                self.cbo_dev_type.setCurrentIndex(index)
+
+    def _delete_device_type(self):
+        """Remove selected device type or prompt user to choose one if blank."""
+        items = [self.cbo_dev_type.itemText(i) for i in range(self.cbo_dev_type.count()) if self.cbo_dev_type.itemText(i).strip()]
+        if not items:
+            QMessageBox.warning(self, "Warning", "No Device Types available to remove.")
+            return
+
+        current_text = self.cbo_dev_type.currentText().strip()
+        if not current_text or current_text not in items:
+            item, ok = QInputDialog.getItem(self, "Remove Device Type", "Select Device Type to remove:", items, 0, False)
+            if ok and item:
+                current_text = item
+            else:
+                return
+
+        reply = QMessageBox.question(
+            self,
+            "Remove Option",
+            f"Are you sure you want to remove '{current_text}'?\n\n"
+            f"(This will remove it from the list and clear it from existing records so it won't reappear.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            idx = self.cbo_dev_type.findText(current_text, Qt.MatchExactly)
+            if idx >= 0:
+                self.cbo_dev_type.removeItem(idx)
+            self.cbo_dev_type.setCurrentIndex(-1)
+
+            # Clear from DB so it doesn't reload in Stock In or Stock Out
+            try:
+                conn = connect_db()
+                cursor = conn.cursor()
+                cursor.execute("UPDATE Inventory SET DeviceType = '' WHERE DeviceType = ?", (current_text,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Database error clearing DeviceType: {e}")
+
     def save_stock_in(self):
-        dev_name = self.txt_dev_name.text().strip()
-        dev_type = self.txt_dev_type.text().strip()
+        dev_name = self.cbo_dev_name.currentText().strip()
+        dev_type = self.cbo_dev_type.currentText().strip()
         quantity = self.spn_quantity.value()
+        unit_price = self.spn_unit_price.value()
+        total_price = self.spn_total_price.value()
         sender = self.txt_sender.text().strip()
         receiver = self.txt_receiver.text().strip()
         receive_dt = self.dt_receive_datetime.dateTime().toString("yyyy-MM-dd HH:mm")
-        warranty_date = self.dt_warranty_date.date().toString("yyyy-MM-dd")
+        
+        # Check if user selected a warranty date or left it blank
+        if self.dt_warranty_date.is_blank():
+            warranty_date = ""
+        else:
+            warranty_date = self.dt_warranty_date.date().toString("yyyy-MM-dd")
+
         barcode = self.txt_barcode.text().strip()
         ticket_num = self.txt_ticket_num.text().strip()
         from_where = self.txt_from_where.text().strip()
@@ -180,18 +719,21 @@ class StockInDialog(QDialog):
             cursor = conn.cursor()
             query = """
                 INSERT INTO Inventory 
-                (DeviceName, DeviceType, Quantity, Sender, Receiver, ReceiveDate, WarrantyDate, Barcode, TicketNumber, FromWhere, SerialNumber, HostName, Note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (DeviceName, DeviceType, Quantity, UnitPrice, TotalPrice, Sender, Receiver, ReceiveDate, WarrantyDate, Barcode, TicketNumber, FromWhere, SerialNumber, HostName, Note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             cursor.execute(query, (
-                dev_name, dev_type, quantity, sender, receiver, receive_dt,
+                dev_name, dev_type, quantity, unit_price, total_price, sender, receiver, receive_dt,
                 warranty_date, barcode, ticket_num, from_where, serial_num, hostname, notes
             ))
             conn.commit()
             conn.close()
 
             # Log transaction in Audit Table
-            audit_details = f"Stock In: Added {quantity}x '{dev_name}' ({dev_type}) received from '{sender}'."
+            audit_details = (
+                f"Stock In: Added {quantity}x '{dev_name}' ({dev_type}) "
+                f"@ ${unit_price:.2f}/unit (Total: ${total_price:.2f}) received from '{sender}'."
+            )
             if notes:
                 audit_details += f" Notes: {notes}"
 
@@ -226,7 +768,7 @@ class StockOutDialog(QDialog):
         super().__init__(parent)
         self.username = username
         self.setWindowTitle("Stock Out - Outbound Transaction")
-        self.resize(540, 750)
+        self.resize(560, 780)
         self.setStyleSheet("QDialog { background-color: #FFFFFF; }")
         self._init_ui()
 
@@ -243,15 +785,79 @@ class StockOutDialog(QDialog):
         form_layout.setSpacing(12)
         form_layout.setLabelAlignment(Qt.AlignRight)
 
-        # 1. Device Name *
-        self.txt_dev_name = QLineEdit()
-        self.txt_dev_name.setPlaceholderText("e.g. ThinkPad X1 Carbon, Dell Latitude")
-        self._style_input(self.txt_dev_name)
+        btn_add_style = """
+            QPushButton {
+                background-color: #1F2D3D; 
+                color: white; 
+                font-weight: bold; 
+                font-size: 14px; 
+                border-radius: 4px; 
+                padding: 4px;
+            }
+            QPushButton:hover { background-color: #34495E; }
+        """
 
-        # 2. Device Type *
-        self.txt_dev_type = QLineEdit()
-        self.txt_dev_type.setPlaceholderText("e.g. Laptop, Monitor, Adapter, Printer")
-        self._style_input(self.txt_dev_type)
+        btn_del_style = """
+            QPushButton {
+                background-color: #EF4444; 
+                color: white; 
+                font-weight: bold; 
+                font-size: 14px; 
+                border-radius: 4px; 
+                padding: 4px;
+            }
+            QPushButton:hover { background-color: #DC2626; }
+        """
+
+        # 1. Device Name * (Dropdown + Add & Delete Buttons)
+        dev_name_layout = QHBoxLayout()
+        dev_name_layout.setSpacing(6)
+
+        self.cbo_dev_name = QComboBox()
+        self._style_input(self.cbo_dev_name)
+
+        btn_add_dev_name = QPushButton("+")
+        btn_add_dev_name.setFixedWidth(30)
+        btn_add_dev_name.setToolTip("Add new Device Name")
+        btn_add_dev_name.setStyleSheet(btn_add_style)
+        btn_add_dev_name.clicked.connect(self._add_new_device_name)
+
+        btn_del_dev_name = QPushButton("-")
+        btn_del_dev_name.setFixedWidth(30)
+        btn_del_dev_name.setToolTip("Remove selected Device Name from options")
+        btn_del_dev_name.setStyleSheet(btn_del_style)
+        btn_del_dev_name.clicked.connect(self._delete_device_name)
+
+        dev_name_layout.addWidget(self.cbo_dev_name, stretch=1)
+        dev_name_layout.addWidget(btn_add_dev_name)
+        dev_name_layout.addWidget(btn_del_dev_name)
+
+        self._populate_device_names()
+
+        # 2. Device Type * (Dropdown + Add & Delete Buttons)
+        dev_type_layout = QHBoxLayout()
+        dev_type_layout.setSpacing(6)
+
+        self.cbo_dev_type = QComboBox()
+        self._style_input(self.cbo_dev_type)
+
+        btn_add_dev_type = QPushButton("+")
+        btn_add_dev_type.setFixedWidth(30)
+        btn_add_dev_type.setToolTip("Add new Device Type")
+        btn_add_dev_type.setStyleSheet(btn_add_style)
+        btn_add_dev_type.clicked.connect(self._add_new_device_type)
+
+        btn_del_dev_type = QPushButton("-")
+        btn_del_dev_type.setFixedWidth(30)
+        btn_del_dev_type.setToolTip("Remove selected Device Type from options")
+        btn_del_dev_type.setStyleSheet(btn_del_style)
+        btn_del_dev_type.clicked.connect(self._delete_device_type)
+
+        dev_type_layout.addWidget(self.cbo_dev_type, stretch=1)
+        dev_type_layout.addWidget(btn_add_dev_type)
+        dev_type_layout.addWidget(btn_del_dev_type)
+
+        self._populate_device_types()
 
         # 3. Quantity *
         self.spn_quantity = QSpinBox()
@@ -308,8 +914,8 @@ class StockOutDialog(QDialog):
         self.txt_notes.setStyleSheet("border: 1px solid #D0D5DD; border-radius: 4px; padding: 6px; font-size: 12px;")
 
         # Form Layout Setup
-        form_layout.addRow(self._make_label("Device Name *"), self.txt_dev_name)
-        form_layout.addRow(self._make_label("Device Type *"), self.txt_dev_type)
+        form_layout.addRow(self._make_label("Device Name *"), dev_name_layout)
+        form_layout.addRow(self._make_label("Device Type *"), dev_type_layout)
         form_layout.addRow(self._make_label("Quantity *"), self.spn_quantity)
         form_layout.addRow(self._make_label("Sender *"), self.txt_sender)
         form_layout.addRow(self._make_label("Receiver *"), self.txt_receiver)
@@ -348,9 +954,159 @@ class StockOutDialog(QDialog):
     def _style_input(self, widget):
         widget.setStyleSheet("border: 1px solid #D0D5DD; border-radius: 4px; padding: 6px; font-size: 12px; background: white;")
 
+    # --- DEVICE NAME HELPER METHODS ---
+    def _populate_device_names(self):
+        """Fetch distinct device names from database and populate dropdown."""
+        self.cbo_dev_name.clear()
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT DeviceName 
+                FROM Inventory 
+                WHERE DeviceName IS NOT NULL AND DeviceName <> '' 
+                ORDER BY DeviceName
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+
+            for row in rows:
+                self.cbo_dev_name.addItem(row[0])
+
+            self.cbo_dev_name.setCurrentIndex(-1)
+        except Exception as e:
+            print(f"Failed to load device names: {e}")
+
+    def _add_new_device_name(self):
+        """Prompt user to add a new device name dynamically."""
+        text, ok = QInputDialog.getText(self, "Add Device Name", "Enter new Device Name:")
+        if ok and text.strip():
+            new_name = text.strip()
+            index = self.cbo_dev_name.findText(new_name, Qt.MatchExactly)
+            if index < 0:
+                self.cbo_dev_name.addItem(new_name)
+                self.cbo_dev_name.setCurrentText(new_name)
+            else:
+                self.cbo_dev_name.setCurrentIndex(index)
+
+    def _delete_device_name(self):
+        """Remove selected device name or prompt user to choose one if blank."""
+        items = [self.cbo_dev_name.itemText(i) for i in range(self.cbo_dev_name.count()) if self.cbo_dev_name.itemText(i).strip()]
+        if not items:
+            QMessageBox.warning(self, "Warning", "No Device Names available to remove.")
+            return
+
+        current_text = self.cbo_dev_name.currentText().strip()
+        if not current_text or current_text not in items:
+            item, ok = QInputDialog.getItem(self, "Remove Device Name", "Select Device Name to remove:", items, 0, False)
+            if ok and item:
+                current_text = item
+            else:
+                return
+
+        reply = QMessageBox.question(
+            self,
+            "Remove Option",
+            f"Are you sure you want to remove '{current_text}'?\n\n"
+            f"(This will remove it from the list and clear it from existing records so it won't reappear.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            idx = self.cbo_dev_name.findText(current_text, Qt.MatchExactly)
+            if idx >= 0:
+                self.cbo_dev_name.removeItem(idx)
+            self.cbo_dev_name.setCurrentIndex(-1)
+
+            # Clear from DB so it doesn't reload in Stock In or Stock Out
+            try:
+                conn = connect_db()
+                cursor = conn.cursor()
+                cursor.execute("UPDATE Inventory SET DeviceName = '' WHERE DeviceName = ?", (current_text,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Database error clearing DeviceName: {e}")
+
+    # --- DEVICE TYPE HELPER METHODS ---
+    def _populate_device_types(self):
+        """Fetch distinct device types from database and populate dropdown."""
+        self.cbo_dev_type.clear()
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT DeviceType 
+                FROM Inventory 
+                WHERE DeviceType IS NOT NULL AND DeviceType <> '' 
+                ORDER BY DeviceType
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+
+            for row in rows:
+                self.cbo_dev_type.addItem(row[0])
+
+            self.cbo_dev_type.setCurrentIndex(-1)
+        except Exception as e:
+            print(f"Failed to load device types: {e}")
+
+    def _add_new_device_type(self):
+        """Prompt user to add a new device type dynamically."""
+        text, ok = QInputDialog.getText(self, "Add Device Type", "Enter new Device Type:")
+        if ok and text.strip():
+            new_type = text.strip()
+            index = self.cbo_dev_type.findText(new_type, Qt.MatchExactly)
+            if index < 0:
+                self.cbo_dev_type.addItem(new_type)
+                self.cbo_dev_type.setCurrentText(new_type)
+            else:
+                self.cbo_dev_type.setCurrentIndex(index)
+
+    def _delete_device_type(self):
+        """Remove selected device type or prompt user to choose one if blank."""
+        items = [self.cbo_dev_type.itemText(i) for i in range(self.cbo_dev_type.count()) if self.cbo_dev_type.itemText(i).strip()]
+        if not items:
+            QMessageBox.warning(self, "Warning", "No Device Types available to remove.")
+            return
+
+        current_text = self.cbo_dev_type.currentText().strip()
+        if not current_text or current_text not in items:
+            item, ok = QInputDialog.getItem(self, "Remove Device Type", "Select Device Type to remove:", items, 0, False)
+            if ok and item:
+                current_text = item
+            else:
+                return
+
+        reply = QMessageBox.question(
+            self,
+            "Remove Option",
+            f"Are you sure you want to remove '{current_text}'?\n\n"
+            f"(This will remove it from the list and clear it from existing records so it won't reappear.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            idx = self.cbo_dev_type.findText(current_text, Qt.MatchExactly)
+            if idx >= 0:
+                self.cbo_dev_type.removeItem(idx)
+            self.cbo_dev_type.setCurrentIndex(-1)
+
+            # Clear from DB so it doesn't reload in Stock In or Stock Out
+            try:
+                conn = connect_db()
+                cursor = conn.cursor()
+                cursor.execute("UPDATE Inventory SET DeviceType = '' WHERE DeviceType = ?", (current_text,))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"Database error clearing DeviceType: {e}")
+
     def save_stock_out(self):
-        dev_name = self.txt_dev_name.text().strip()
-        dev_type = self.txt_dev_type.text().strip()
+        dev_name = self.cbo_dev_name.currentText().strip()
+        dev_type = self.cbo_dev_type.currentText().strip()
         quantity = self.spn_quantity.value()
         sender = self.txt_sender.text().strip()
         receiver = self.txt_receiver.text().strip()
