@@ -1,5 +1,6 @@
 import os
 import csv
+import pyodbc
 from datetime import datetime
 from PyQt5.QtWidgets import (
     QDialog, QDoubleSpinBox, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -29,25 +30,21 @@ class BlankDateEdit(QDateEdit):
             self._has_value = True
 
     def textFromDateTime(self, dateTime):
-        """Prevents Qt from displaying 1753-09-14 under any circumstances while blank."""
         if not getattr(self, '_has_value', False) or dateTime.date() == self.minimumDate():
             return ""
         return super().textFromDateTime(dateTime)
 
     def focusInEvent(self, event):
-        """Auto-fills today's date immediately upon getting focus."""
         if not getattr(self, '_has_value', False) or self.date() == self.minimumDate():
             self._set_to_today()
         super().focusInEvent(event)
 
     def mousePressEvent(self, event):
-        """Auto-fills today's date immediately upon mouse click."""
         if not getattr(self, '_has_value', False) or self.date() == self.minimumDate():
             self._set_to_today()
         super().mousePressEvent(event)
 
     def keyPressEvent(self, event):
-        """Pressing Backspace or Delete resets the field back to blank."""
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self._has_value = False
             self.setDate(self.minimumDate())
@@ -87,37 +84,32 @@ class BlankDateEdit(QDateEdit):
         return super().eventFilter(obj, event)
 
     def is_blank(self):
-        """Returns True if the user left the field blank."""
         return not getattr(self, '_has_value', False) or self.date() == self.minimumDate()
 
 
 # ==========================================
 # EXPORT DIALOG
 # ==========================================
-import pyodbc
-
 class ExportDialog(QDialog):
-    def __init__(self, username="System", parent=None):
+    def __init__(self, username="System", is_admin=False, parent=None):
+        if isinstance(username, QWidget):
+            parent = username
+            username = getattr(parent, 'username', 'System')
+            is_admin = getattr(parent, 'is_admin', False)
+
         super().__init__(parent)
         self.username = username
+        self.is_admin = is_admin or self._check_admin_status()
         self.setWindowTitle("Export Data to CSV")
         self.resize(340, 160)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
 
-        # Set standard system font matching Import dialogs
         app_font = QFont("Segoe UI", 9)
         self.setFont(app_font)
 
-        # Clean stylesheet: resets font-weight to normal and uses standard system buttons
         self.setStyleSheet("""
-            QDialog {
-                background-color: #f8f9fa;
-            }
-            QLabel {
-                color: #000000;
-                font-size: 12px;
-                font-weight: normal;
-            }
+            QDialog { background-color: #f8f9fa; }
+            QLabel { color: #000000; font-size: 12px; font-weight: normal; }
             QComboBox {
                 background-color: #ffffff;
                 border: 1px solid #ababab;
@@ -126,9 +118,7 @@ class ExportDialog(QDialog):
                 font-size: 12px;
                 color: #000000;
             }
-            QComboBox:hover, QComboBox:focus {
-                border-color: #0078d7;
-            }
+            QComboBox:hover, QComboBox:focus { border-color: #0078d7; }
             QPushButton {
                 background-color: #ffffff;
                 color: #000000;
@@ -138,16 +128,10 @@ class ExportDialog(QDialog):
                 font-size: 12px;
                 font-weight: normal;
             }
-            QPushButton:hover {
-                background-color: #e5f1fb;
-                border-color: #0078d7;
-            }
-            QPushButton:pressed {
-                background-color: #cce4f7;
-            }
+            QPushButton:hover { background-color: #e5f1fb; border-color: #0078d7; }
+            QPushButton:pressed { background-color: #cce4f7; }
         """)
 
-        # Main Layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
@@ -156,12 +140,14 @@ class ExportDialog(QDialog):
         layout.addWidget(lbl_title)
 
         self.combo_dataset = QComboBox(self)
-        self.combo_dataset.addItems(["Inventory", "Audit Logs"])
+        datasets = ["Inventory"]
+        if self.is_admin:
+            datasets.append("Audit Logs")
+        self.combo_dataset.addItems(datasets)
         layout.addWidget(self.combo_dataset)
 
         layout.addStretch()
 
-        # Action Buttons
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
 
@@ -176,8 +162,27 @@ class ExportDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+    def _check_admin_status(self):
+        if self.username == "System":
+            return True
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("SELECT Role FROM Users WHERE Username = ?", (self.username,))
+            row = cursor.fetchone()
+            conn.close()
+            if row and str(row[0]).strip().lower() in ['admin', 'administrator']:
+                return True
+        except Exception:
+            pass
+        return False
+
     def export_data(self):
         dataset_choice = self.combo_dataset.currentText().strip()
+
+        if dataset_choice == "Audit Logs" and not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can view or export History/Audit Logs.")
+            return
 
         file_path, _ = QFileDialog.getSaveFileName(
             self, 
@@ -212,7 +217,6 @@ class ExportDialog(QDialog):
                 for row in rows:
                     writer.writerow([str(val) if val is not None else "" for val in row])
 
-            # Reset child message box style to clean system default font
             msg_box = QMessageBox(self)
             msg_box.setIcon(QMessageBox.Information)
             msg_box.setWindowTitle("Export Success")
@@ -228,97 +232,39 @@ class ExportDialog(QDialog):
             if conn:
                 conn.close()
 
-        # Main Layout Construction
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(12)
-
-        lbl_title = QLabel("Select Dataset to Export:", self)
-        layout.addWidget(lbl_title)
-
-        self.combo_dataset = QComboBox(self)
-        self.combo_dataset.addItems(["Inventory", "Audit Logs"])
-        layout.addWidget(self.combo_dataset)
-
-        layout.addStretch()
-
-        # Action Button Row
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
-
-        self.btn_cancel = QPushButton("Cancel", self)
-        self.btn_cancel.setObjectName("btnCancel")
-        self.btn_cancel.clicked.connect(self.reject)
-
-        self.btn_export = QPushButton("Export CSV", self)
-        self.btn_export.clicked.connect(self.export_data)
-
-        btn_layout.addWidget(self.btn_cancel)
-        btn_layout.addWidget(self.btn_export)
-
-        layout.addLayout(btn_layout)
-
-    def export_data(self):
-        dataset_choice = self.combo_dataset.currentText().strip()
-
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, 
-            "Save CSV File", 
-            f"{dataset_choice.lower().replace(' ', '_')}_export.csv", 
-            "CSV Files (*.csv)"
-        )
-
-        if not file_path:
-            return
-
-        if dataset_choice == "Inventory":
-            query = "SELECT * FROM Inventory"
-        elif dataset_choice == "Audit Logs":
-            query = "SELECT * FROM AuditLogs"
-        else:
-            QMessageBox.warning(self, "Export Error", f"Unknown dataset option: {dataset_choice}")
-            return
-
-        conn = None
-        try:
-            conn = connect_db()
-            cursor = conn.cursor()
-            cursor.execute(query)
-
-            rows = cursor.fetchall()
-            headers = [column[0] for column in cursor.description] if cursor.description else []
-
-            with open(file_path, mode='w', newline='', encoding='utf-8-sig') as file:
-                writer = csv.writer(file)
-                writer.writerow(headers)
-                for row in rows:
-                    writer.writerow([str(val) if val is not None else "" for val in row])
-
-            QMessageBox.information(self, "Export Success", f"Data successfully exported to:\n{file_path}")
-            self.accept()
-
-        except Exception as e:
-            QMessageBox.critical(self, "Export Failed", f"An error occurred while exporting:\n{e}")
-        finally:
-            if conn:
-                conn.close()
-
 
 # ==========================================
 # STOCK IN DIALOG
 # ==========================================
 class StockInDialog(QDialog):
-    def __init__(self, username="System", parent=None):
+    def __init__(self, username="System", is_admin=False, parent=None):
         if isinstance(username, QWidget):
             parent = username
             username = getattr(parent, 'username', 'System')
+            is_admin = getattr(parent, 'is_admin', False)
         
         super().__init__(parent)
         self.username = username
+        self.is_admin = is_admin or self._check_admin_status()
         self.setWindowTitle("Stock In - Inbound Transaction")
         self.resize(560, 780)
         self.setStyleSheet("QDialog { background-color: #FFFFFF; }")
         self._init_ui()
+
+    def _check_admin_status(self):
+        if self.username == "System":
+            return True
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("SELECT Role FROM Users WHERE Username = ?", (self.username,))
+            row = cursor.fetchone()
+            conn.close()
+            if row and str(row[0]).strip().lower() in ['admin', 'administrator']:
+                return True
+        except Exception:
+            pass
+        return False
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -357,7 +303,7 @@ class StockInDialog(QDialog):
             QPushButton:hover { background-color: #DC2626; }
         """
 
-        # 1. Device Name * (Dropdown + Add & Delete Buttons)
+        # 1. Device Name *
         dev_name_layout = QHBoxLayout()
         dev_name_layout.setSpacing(6)
 
@@ -368,21 +314,24 @@ class StockInDialog(QDialog):
         btn_add_dev_name.setFixedWidth(30)
         btn_add_dev_name.setToolTip("Add new Device Name")
         btn_add_dev_name.setStyleSheet(btn_add_style)
+        btn_add_dev_name.setVisible(self.is_admin)
         btn_add_dev_name.clicked.connect(self._add_new_device_name)
 
         btn_del_dev_name = QPushButton("-")
         btn_del_dev_name.setFixedWidth(30)
         btn_del_dev_name.setToolTip("Remove selected Device Name from options")
         btn_del_dev_name.setStyleSheet(btn_del_style)
+        btn_del_dev_name.setVisible(self.is_admin)
         btn_del_dev_name.clicked.connect(self._delete_device_name)
 
         dev_name_layout.addWidget(self.cbo_dev_name, stretch=1)
-        dev_name_layout.addWidget(btn_add_dev_name)
-        dev_name_layout.addWidget(btn_del_dev_name)
+        if self.is_admin:
+            dev_name_layout.addWidget(btn_add_dev_name)
+            dev_name_layout.addWidget(btn_del_dev_name)
 
         self._populate_device_names()
 
-        # 2. Device Type * (Dropdown + Add & Delete Buttons)
+        # 2. Device Type *
         dev_type_layout = QHBoxLayout()
         dev_type_layout.setSpacing(6)
 
@@ -393,17 +342,20 @@ class StockInDialog(QDialog):
         btn_add_dev_type.setFixedWidth(30)
         btn_add_dev_type.setToolTip("Add new Device Type")
         btn_add_dev_type.setStyleSheet(btn_add_style)
+        btn_add_dev_type.setVisible(self.is_admin)
         btn_add_dev_type.clicked.connect(self._add_new_device_type)
 
         btn_del_dev_type = QPushButton("-")
         btn_del_dev_type.setFixedWidth(30)
         btn_del_dev_type.setToolTip("Remove selected Device Type from options")
         btn_del_dev_type.setStyleSheet(btn_del_style)
+        btn_del_dev_type.setVisible(self.is_admin)
         btn_del_dev_type.clicked.connect(self._delete_device_type)
 
         dev_type_layout.addWidget(self.cbo_dev_type, stretch=1)
-        dev_type_layout.addWidget(btn_add_dev_type)
-        dev_type_layout.addWidget(btn_del_dev_type)
+        if self.is_admin:
+            dev_type_layout.addWidget(btn_add_dev_type)
+            dev_type_layout.addWidget(btn_del_dev_type)
 
         self._populate_device_types()
 
@@ -412,7 +364,7 @@ class StockInDialog(QDialog):
         self.spn_quantity.setRange(1, 10000)
         self.spn_quantity.setValue(1)
         self._style_input(self.spn_quantity)
-        self.spn_quantity.valueChanged.connect(self._update_total_price)
+        self.spn_quantity.valueChanged.connect(self._recalculate_from_unit)
 
         # 4. Sender *
         self.txt_sender = QLineEdit()
@@ -431,7 +383,7 @@ class StockInDialog(QDialog):
         self.dt_receive_datetime.setCalendarPopup(True)
         self._style_input(self.dt_receive_datetime)
 
-        # 7. Warranty Date (Blank by default)
+        # 7. Warranty Date
         self.dt_warranty_date = BlankDateEdit()
         self._style_input(self.dt_warranty_date)
 
@@ -466,15 +418,15 @@ class StockInDialog(QDialog):
         self.spn_unit_price.setDecimals(2)
         self.spn_unit_price.setPrefix("$ ")
         self._style_input(self.spn_unit_price)
-        self.spn_unit_price.valueChanged.connect(self._update_total_price)
+        self.spn_unit_price.valueChanged.connect(self._recalculate_from_unit)
 
-        # 14. Total Price (Auto-calculated, Read-only)
+        # 14. Total Price (Bidirectional & Editable)
         self.spn_total_price = QDoubleSpinBox()
         self.spn_total_price.setRange(0.00, 99999999.99)
         self.spn_total_price.setDecimals(2)
         self.spn_total_price.setPrefix("$ ")
-        self.spn_total_price.setReadOnly(True)
-        self.spn_total_price.setStyleSheet("border: 1px solid #D0D5DD; border-radius: 4px; padding: 6px; font-size: 12px; background: #F4F4F5;")
+        self._style_input(self.spn_total_price)
+        self.spn_total_price.valueChanged.connect(self._recalculate_from_total)
 
         # 15. Notes
         self.txt_notes = QTextEdit()
@@ -526,15 +478,27 @@ class StockInDialog(QDialog):
     def _style_input(self, widget):
         widget.setStyleSheet("border: 1px solid #D0D5DD; border-radius: 4px; padding: 6px; font-size: 12px; background: white;")
 
-    def _update_total_price(self):
-        """Calculates total price based on quantity and unit price."""
+    def _recalculate_from_unit(self):
+        """Calculates Total Price when Quantity or Unit Price changes."""
         qty = self.spn_quantity.value()
         unit_price = self.spn_unit_price.value()
+        
+        self.spn_total_price.blockSignals(True)
         self.spn_total_price.setValue(qty * unit_price)
+        self.spn_total_price.blockSignals(False)
+
+    def _recalculate_from_total(self):
+        """Calculates Unit Price when Total Price changes."""
+        qty = self.spn_quantity.value()
+        total_price = self.spn_total_price.value()
+        
+        if qty > 0:
+            self.spn_unit_price.blockSignals(True)
+            self.spn_unit_price.setValue(total_price / qty)
+            self.spn_unit_price.blockSignals(False)
 
     # --- DEVICE NAME HELPER METHODS ---
     def _populate_device_names(self):
-        """Fetch distinct device names from database and populate dropdown."""
         self.cbo_dev_name.clear()
         try:
             conn = connect_db()
@@ -556,7 +520,10 @@ class StockInDialog(QDialog):
             print(f"Failed to load device names: {e}")
 
     def _add_new_device_name(self):
-        """Prompt user to add a new device name dynamically."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can add new Device Names.")
+            return
+
         text, ok = QInputDialog.getText(self, "Add Device Name", "Enter new Device Name:")
         if ok and text.strip():
             new_name = text.strip()
@@ -568,7 +535,10 @@ class StockInDialog(QDialog):
                 self.cbo_dev_name.setCurrentIndex(index)
 
     def _delete_device_name(self):
-        """Remove selected device name or prompt user to choose one if blank."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can remove Device Names.")
+            return
+
         items = [self.cbo_dev_name.itemText(i) for i in range(self.cbo_dev_name.count()) if self.cbo_dev_name.itemText(i).strip()]
         if not items:
             QMessageBox.warning(self, "Warning", "No Device Names available to remove.")
@@ -597,7 +567,6 @@ class StockInDialog(QDialog):
                 self.cbo_dev_name.removeItem(idx)
             self.cbo_dev_name.setCurrentIndex(-1)
 
-            # Clear from DB so it doesn't reload in Stock In or Stock Out
             try:
                 conn = connect_db()
                 cursor = conn.cursor()
@@ -609,7 +578,6 @@ class StockInDialog(QDialog):
 
     # --- DEVICE TYPE HELPER METHODS ---
     def _populate_device_types(self):
-        """Fetch distinct device types from database and populate dropdown."""
         self.cbo_dev_type.clear()
         try:
             conn = connect_db()
@@ -631,7 +599,10 @@ class StockInDialog(QDialog):
             print(f"Failed to load device types: {e}")
 
     def _add_new_device_type(self):
-        """Prompt user to add a new device type dynamically."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can add new Device Types.")
+            return
+
         text, ok = QInputDialog.getText(self, "Add Device Type", "Enter new Device Type:")
         if ok and text.strip():
             new_type = text.strip()
@@ -643,7 +614,10 @@ class StockInDialog(QDialog):
                 self.cbo_dev_type.setCurrentIndex(index)
 
     def _delete_device_type(self):
-        """Remove selected device type or prompt user to choose one if blank."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can remove Device Types.")
+            return
+
         items = [self.cbo_dev_type.itemText(i) for i in range(self.cbo_dev_type.count()) if self.cbo_dev_type.itemText(i).strip()]
         if not items:
             QMessageBox.warning(self, "Warning", "No Device Types available to remove.")
@@ -672,7 +646,6 @@ class StockInDialog(QDialog):
                 self.cbo_dev_type.removeItem(idx)
             self.cbo_dev_type.setCurrentIndex(-1)
 
-            # Clear from DB so it doesn't reload in Stock In or Stock Out
             try:
                 conn = connect_db()
                 cursor = conn.cursor()
@@ -692,7 +665,6 @@ class StockInDialog(QDialog):
         receiver = self.txt_receiver.text().strip()
         receive_dt = self.dt_receive_datetime.dateTime().toString("yyyy-MM-dd HH:mm")
         
-        # Check if user selected a warranty date or left it blank
         if self.dt_warranty_date.is_blank():
             warranty_date = ""
         else:
@@ -705,7 +677,6 @@ class StockInDialog(QDialog):
         hostname = self.txt_hostname.text().strip()
         notes = self.txt_notes.toPlainText().strip()
 
-        # Validation
         if not dev_name or not dev_type or not sender or not receiver or not barcode:
             QMessageBox.warning(
                 self, 
@@ -729,7 +700,6 @@ class StockInDialog(QDialog):
             conn.commit()
             conn.close()
 
-            # Log transaction in Audit Table
             audit_details = (
                 f"Stock In: Added {quantity}x '{dev_name}' ({dev_type}) "
                 f"@ ${unit_price:.2f}/unit (Total: ${total_price:.2f}) received from '{sender}'."
@@ -760,17 +730,34 @@ class StockInDialog(QDialog):
 # STOCK OUT DIALOG
 # ==========================================
 class StockOutDialog(QDialog):
-    def __init__(self, username="System", parent=None):
+    def __init__(self, username="System", is_admin=False, parent=None):
         if isinstance(username, QWidget):
             parent = username
             username = getattr(parent, 'username', 'System')
+            is_admin = getattr(parent, 'is_admin', False)
 
         super().__init__(parent)
         self.username = username
+        self.is_admin = is_admin or self._check_admin_status()
         self.setWindowTitle("Stock Out - Outbound Transaction")
         self.resize(560, 780)
         self.setStyleSheet("QDialog { background-color: #FFFFFF; }")
         self._init_ui()
+
+    def _check_admin_status(self):
+        if self.username == "System":
+            return True
+        try:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("SELECT Role FROM Users WHERE Username = ?", (self.username,))
+            row = cursor.fetchone()
+            conn.close()
+            if row and str(row[0]).strip().lower() in ['admin', 'administrator']:
+                return True
+        except Exception:
+            pass
+        return False
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -809,7 +796,7 @@ class StockOutDialog(QDialog):
             QPushButton:hover { background-color: #DC2626; }
         """
 
-        # 1. Device Name * (Dropdown + Add & Delete Buttons)
+        # 1. Device Name *
         dev_name_layout = QHBoxLayout()
         dev_name_layout.setSpacing(6)
 
@@ -820,21 +807,24 @@ class StockOutDialog(QDialog):
         btn_add_dev_name.setFixedWidth(30)
         btn_add_dev_name.setToolTip("Add new Device Name")
         btn_add_dev_name.setStyleSheet(btn_add_style)
+        btn_add_dev_name.setVisible(self.is_admin)
         btn_add_dev_name.clicked.connect(self._add_new_device_name)
 
         btn_del_dev_name = QPushButton("-")
         btn_del_dev_name.setFixedWidth(30)
         btn_del_dev_name.setToolTip("Remove selected Device Name from options")
         btn_del_dev_name.setStyleSheet(btn_del_style)
+        btn_del_dev_name.setVisible(self.is_admin)
         btn_del_dev_name.clicked.connect(self._delete_device_name)
 
         dev_name_layout.addWidget(self.cbo_dev_name, stretch=1)
-        dev_name_layout.addWidget(btn_add_dev_name)
-        dev_name_layout.addWidget(btn_del_dev_name)
+        if self.is_admin:
+            dev_name_layout.addWidget(btn_add_dev_name)
+            dev_name_layout.addWidget(btn_del_dev_name)
 
         self._populate_device_names()
 
-        # 2. Device Type * (Dropdown + Add & Delete Buttons)
+        # 2. Device Type *
         dev_type_layout = QHBoxLayout()
         dev_type_layout.setSpacing(6)
 
@@ -845,17 +835,20 @@ class StockOutDialog(QDialog):
         btn_add_dev_type.setFixedWidth(30)
         btn_add_dev_type.setToolTip("Add new Device Type")
         btn_add_dev_type.setStyleSheet(btn_add_style)
+        btn_add_dev_type.setVisible(self.is_admin)
         btn_add_dev_type.clicked.connect(self._add_new_device_type)
 
         btn_del_dev_type = QPushButton("-")
         btn_del_dev_type.setFixedWidth(30)
         btn_del_dev_type.setToolTip("Remove selected Device Type from options")
         btn_del_dev_type.setStyleSheet(btn_del_style)
+        btn_del_dev_type.setVisible(self.is_admin)
         btn_del_dev_type.clicked.connect(self._delete_device_type)
 
         dev_type_layout.addWidget(self.cbo_dev_type, stretch=1)
-        dev_type_layout.addWidget(btn_add_dev_type)
-        dev_type_layout.addWidget(btn_del_dev_type)
+        if self.is_admin:
+            dev_type_layout.addWidget(btn_add_dev_type)
+            dev_type_layout.addWidget(btn_del_dev_type)
 
         self._populate_device_types()
 
@@ -956,7 +949,6 @@ class StockOutDialog(QDialog):
 
     # --- DEVICE NAME HELPER METHODS ---
     def _populate_device_names(self):
-        """Fetch distinct device names from database and populate dropdown."""
         self.cbo_dev_name.clear()
         try:
             conn = connect_db()
@@ -978,7 +970,10 @@ class StockOutDialog(QDialog):
             print(f"Failed to load device names: {e}")
 
     def _add_new_device_name(self):
-        """Prompt user to add a new device name dynamically."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can add new Device Names.")
+            return
+
         text, ok = QInputDialog.getText(self, "Add Device Name", "Enter new Device Name:")
         if ok and text.strip():
             new_name = text.strip()
@@ -990,7 +985,10 @@ class StockOutDialog(QDialog):
                 self.cbo_dev_name.setCurrentIndex(index)
 
     def _delete_device_name(self):
-        """Remove selected device name or prompt user to choose one if blank."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can remove Device Names.")
+            return
+
         items = [self.cbo_dev_name.itemText(i) for i in range(self.cbo_dev_name.count()) if self.cbo_dev_name.itemText(i).strip()]
         if not items:
             QMessageBox.warning(self, "Warning", "No Device Names available to remove.")
@@ -1019,7 +1017,6 @@ class StockOutDialog(QDialog):
                 self.cbo_dev_name.removeItem(idx)
             self.cbo_dev_name.setCurrentIndex(-1)
 
-            # Clear from DB so it doesn't reload in Stock In or Stock Out
             try:
                 conn = connect_db()
                 cursor = conn.cursor()
@@ -1031,7 +1028,6 @@ class StockOutDialog(QDialog):
 
     # --- DEVICE TYPE HELPER METHODS ---
     def _populate_device_types(self):
-        """Fetch distinct device types from database and populate dropdown."""
         self.cbo_dev_type.clear()
         try:
             conn = connect_db()
@@ -1053,7 +1049,10 @@ class StockOutDialog(QDialog):
             print(f"Failed to load device types: {e}")
 
     def _add_new_device_type(self):
-        """Prompt user to add a new device type dynamically."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can add new Device Types.")
+            return
+
         text, ok = QInputDialog.getText(self, "Add Device Type", "Enter new Device Type:")
         if ok and text.strip():
             new_type = text.strip()
@@ -1065,7 +1064,10 @@ class StockOutDialog(QDialog):
                 self.cbo_dev_type.setCurrentIndex(index)
 
     def _delete_device_type(self):
-        """Remove selected device type or prompt user to choose one if blank."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can remove Device Types.")
+            return
+
         items = [self.cbo_dev_type.itemText(i) for i in range(self.cbo_dev_type.count()) if self.cbo_dev_type.itemText(i).strip()]
         if not items:
             QMessageBox.warning(self, "Warning", "No Device Types available to remove.")
@@ -1094,7 +1096,6 @@ class StockOutDialog(QDialog):
                 self.cbo_dev_type.removeItem(idx)
             self.cbo_dev_type.setCurrentIndex(-1)
 
-            # Clear from DB so it doesn't reload in Stock In or Stock Out
             try:
                 conn = connect_db()
                 cursor = conn.cursor()
@@ -1118,7 +1119,6 @@ class StockOutDialog(QDialog):
         hostname = self.txt_hostname.text().strip()
         notes = self.txt_notes.toPlainText().strip()
 
-        # Strict Mandatory Validation Check
         missing_fields = []
         if not dev_name: missing_fields.append("Device Name")
         if not dev_type: missing_fields.append("Device Type")
@@ -1141,7 +1141,6 @@ class StockOutDialog(QDialog):
             conn = connect_db()
             cursor = conn.cursor()
 
-            # Search database for a matching item
             search_query = """
                 SELECT Id, Quantity FROM Inventory 
                 WHERE LOWER(DeviceName) = LOWER(?) 
@@ -1167,7 +1166,6 @@ class StockOutDialog(QDialog):
 
             item_id, current_qty = row[0], row[1]
 
-            # Check quantity availability
             if current_qty < quantity:
                 QMessageBox.critical(
                     self, 
@@ -1178,7 +1176,6 @@ class StockOutDialog(QDialog):
                 conn.close()
                 return
 
-            # Deduct quantity or remove item if quantity hits 0
             new_qty = current_qty - quantity
             if new_qty <= 0:
                 cursor.execute("DELETE FROM Inventory WHERE Id = ?", (item_id,))
@@ -1188,7 +1185,6 @@ class StockOutDialog(QDialog):
             conn.commit()
             conn.close()
 
-            # Log transaction in Audit Table
             audit_details = (
                 f"Stock Out: {quantity}x '{dev_name}' ({dev_type}) issued to '{receiver}' "
                 f"at '{to_where}'. Sent by: '{sender}'. Serial: '{serial_num}', Ticket: '{ticket_num}'."

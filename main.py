@@ -3,13 +3,15 @@ import ctypes
 import os
 import csv
 import re
-import webbrowser
 from datetime import datetime, date
-import ctypes
-import sys
+
 import time
 import pyodbc
 from dialogs import ExportDialog
+from PyQt5.QtWidgets import QShortcut
+from PyQt5.QtGui import QKeySequence
+
+from database import init_db, get_resource_path
 
 def connect_with_retry(max_retries=5, delay=3):
     """
@@ -33,6 +35,7 @@ def connect_with_retry(max_retries=5, delay=3):
                 time.sleep(delay)
             else:
                 raise e  # Fail gracefully after all retries are exhausted
+
 # Force Windows to assign custom taskbar and title bar icons
 if sys.platform == 'win32':
     myappid = 'itwarehouse.inventorydesk.app.1.0' 
@@ -43,12 +46,11 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton, QLabel,
     QFrame, QMessageBox, QDialog, QScrollArea, QAbstractItemView,
     QStackedWidget, QMenuBar, QAction, QLineEdit, QComboBox,
-    QMenu, QFileDialog, QFontDialog, QInputDialog, QStatusBar,
-    QFormLayout, QRadioButton, QGroupBox, QCheckBox, QDateEdit
+    QFileDialog, QFormLayout, QRadioButton, QGroupBox, QCheckBox, QDateEdit
 )
-from PyQt5.QtCore import Qt, QUrl, QDate
-from PyQt5.QtGui import QIcon, QPixmap, QKeySequence, QFont, QGuiApplication, QTextDocument
-from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPageSetupDialog
+from PyQt5.QtCore import Qt, QDate
+from PyQt5.QtGui import QIcon, QPixmap, QKeySequence, QTextDocument
+from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -229,6 +231,10 @@ def _add_new_device_name(self):
         layout.addWidget(self.filter_box)
 
         # Buttons
+
+        self.btn_logout = QPushButton("Logout", self)
+        self.btn_logout.clicked.connect(self.logout)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
@@ -243,6 +249,46 @@ def _add_new_device_name(self):
         btn_layout.addWidget(btn_cancel)
         btn_layout.addWidget(btn_export)
         layout.addLayout(btn_layout)
+
+
+    def logout(self):
+        """Logs out the current user and prompts for new credentials without quitting."""
+        from PyQt5.QtWidgets import QMessageBox, QDialog
+        from auth import LoginDialog # Make sure this matches your login import
+        
+        confirm = QMessageBox.question(
+            self,
+            "Logout Confirmation",
+            "Are you sure you want to log out?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if confirm != QMessageBox.Yes:
+            return
+
+        # Hide the main window
+        self.hide()
+
+        # Re-launch the login dialog
+        login_dialog = LoginDialog()
+        
+        if login_dialog.exec_() == QDialog.Accepted:
+            # Update credentials based on your LoginDialog properties
+            self.username = login_dialog.username
+            self.user_role = login_dialog.user_role
+            self.is_admin = str(self.user_role).strip().lower() in ['admin', 'administrator']
+
+            # Re-apply permissions and refresh data for the new user
+            self.apply_user_permissions()
+            self.refresh_all_data()
+            
+            # Show the window again
+            self.show()
+        else:
+            # If they cancel the login screen, close the application entirely
+            self.close()
+
 
     def _toggle_filter_options(self, checked):
         self.filter_box.setEnabled(not checked)
@@ -340,7 +386,15 @@ class UserManagementDialog(QDialog):
     def __init__(self, current_username, current_role, parent=None):
         super().__init__(parent)
         self.current_username = current_username
-        self.current_role = current_role
+        self.current_role = str(current_role).strip().lower()
+        self.is_admin = self.current_role in ['admin', 'administrator']
+
+        # Block non-admins at dialog launch
+        if not self.is_admin:
+            QMessageBox.warning(parent or self, "Access Denied", "Only administrators can access user management.")
+            self.reject()
+            return
+
         self.setWindowTitle("User Management")
         self.resize(650, 500)
         self.setStyleSheet("QDialog { background-color: #FFFFFF; }")
@@ -559,6 +613,8 @@ class ItemDetailsDialog(QDialog):
 # ==========================================
 # CHARTS
 # ==========================================
+from PyQt5.QtWidgets import QSizePolicy
+
 class DonutChartCanvas(FigureCanvas):
     def __init__(self, parent=None, width=4, height=3, dpi=100):
         fig = Figure(figsize=(width, height), dpi=dpi)
@@ -568,54 +624,150 @@ class DonutChartCanvas(FigureCanvas):
         super(DonutChartCanvas, self).__init__(fig)
         self.setStyleSheet("background-color: transparent;")
 
-    def update_chart(self, data_dict):
+        # Enable auto-scaling with window resizes
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.updateGeometry()
+
+    def update_chart(self, data_dict, max_items=6):
         self.axes.clear()
+        
         if not data_dict:
-            self.axes.text(0.5, 0.5, "No data", horizontalalignment='center', verticalalignment='center', color="#667085")
+            self.axes.text(0, 0, "No data", horizontalalignment='center', verticalalignment='center', color="#667085")
             self.draw()
             return
+
+        # 1. Group smaller categories into 'Other' to eliminate thin, messy slices
+        sorted_items = sorted(data_dict.items(), key=lambda x: x[1], reverse=True)
+        if len(sorted_items) > max_items:
+            top_items = dict(sorted_items[:max_items - 1])
+            top_items["Other"] = sum(val for _, val in sorted_items[max_items - 1:])
+            data_dict = top_items
 
         labels = list(data_dict.keys())
         sizes = list(data_dict.values())
         total = sum(sizes)
-        colors = ['#3B5998', '#D97757', '#5C8A8A', '#D9A05B', '#6B5B95', '#88B04B']
-
-        wedges, _ = self.axes.pie(
-            sizes, colors=colors, startangle=90, 
-            wedgeprops=dict(width=0.25, edgecolor='#FFFFFF', linewidth=2)
-        )
-
-        self.axes.text(0, 0.1, str(total), horizontalalignment='center', verticalalignment='center', fontsize=18, fontweight='bold', color="#101828")
-        self.axes.text(0, -0.2, "units", horizontalalignment='center', verticalalignment='center', fontsize=9, color="#667085")
         
-        self.axes.legend(
-            wedges, [f"{l} ({s})" for l, s in zip(labels, sizes)],
-            title="Legend", loc="center left", bbox_to_anchor=(0.9, 0, 0.5, 1),
-            frameon=False, fontsize=9
+        colors = ['#3B5998', '#D97757', '#5C8A8A', '#D9A05B', '#6B5B95', '#88B04B', '#94A3B8']
+
+        # 2. Render Donut Slices
+        wedges, _ = self.axes.pie(
+            sizes, 
+            colors=colors[:len(sizes)], 
+            startangle=90, 
+            wedgeprops=dict(width=0.28, edgecolor='#FFFFFF', linewidth=2)
         )
+
+        # 3. Center Text
+        self.axes.text(0, 0.05, f"{total:,}", horizontalalignment='center', verticalalignment='center', fontsize=16, fontweight='bold', color="#101828")
+        self.axes.text(0, -0.12, "units", horizontalalignment='center', verticalalignment='center', fontsize=9, color="#667085")
+        
+        # 4. Position Legend safely outside the pie
+        legend_labels = [f"{lbl} ({val})" for lbl, val in zip(labels, sizes)]
+        self.axes.legend(
+            wedges, 
+            legend_labels,
+            title="Legend", 
+            loc="center left", 
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=False, 
+            fontsize=8,
+            title_fontsize=9,
+            labelspacing=0.5
+        )
+
+        # 5. Reserve plot margins so the legend is never cut off
+        self.figure.subplots_adjust(left=0.05, right=0.58, top=0.92, bottom=0.08)
         self.draw()
 
+
+def load_absolute_app_icon():
+    """Locates and returns the application icon using strict absolute path resolution."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Check for native .ico first, then .png fallbacks
+    candidates = [
+        os.path.join(base_dir, "assets", "logo.ico"),
+        os.path.join(base_dir, "assets", "logo.png"),
+        os.path.join(base_dir, "logo.ico"),
+        os.path.join(base_dir, "logo.png"),
+    ]
+    
+    for path in candidates:
+        if os.path.exists(path):
+            return QIcon(path)
+            
+    return QIcon()
 
 # ==========================================
 # MAIN WINDOW
 # ==========================================
 class MainWindow(QMainWindow):
+    # Inside class MainWindow(QMainWindow):
     def __init__(self, username, user_role):
         super().__init__()
         self.username = username
         self.user_role = user_role
 
+        self.is_admin = str(self.user_role).strip().lower() in ['admin', 'administrator']
+
         self.setWindowTitle("Inventory Desk - Operations")
         self.setGeometry(50, 50, 1400, 850)
         self.setStyleSheet("QMainWindow { background-color: #FBFBFA; }")
         
-        icon_path = find_logo_path()
-        if icon_path:
-            self.setWindowIcon(QIcon(icon_path))
+        # Set window icon directly using absolute resolution
+        app_icon = load_absolute_app_icon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
 
         self._ensure_database_schema()
         self._init_ui()
+        self.apply_user_permissions()
         self.refresh_all_data()
+
+    def closeEvent(self, event):
+        """Executes when the main window is closed to cleanly terminate all processes."""
+        import matplotlib.pyplot as plt
+        from PyQt5.QtWidgets import QApplication
+
+        # Close active Matplotlib plots hanging in background memory
+        plt.close('all')
+
+        # Accept the event and exit the Qt application cleanly
+        event.accept()
+        QApplication.quit()
+
+        
+    def apply_user_permissions(self):
+        """Restricts UI access for non-admin accounts."""
+        
+        # History Tab/Button restrictions
+        if hasattr(self, 'tab_widget'):
+            for i in range(self.tab_widget.count()):
+                tab_name = self.tab_widget.tabText(i).strip().lower()
+                if tab_name in ["history", "audit logs", "audit log"]:
+                    self.tab_widget.setTabVisible(i, self.is_admin)
+
+        if hasattr(self, 'btn_hist'):
+            self.btn_hist.setVisible(self.is_admin)
+        if hasattr(self, 'btn_history'):
+            self.btn_history.setVisible(self.is_admin)
+        if hasattr(self, 'action_history'):
+            self.action_history.setVisible(self.is_admin)
+
+        # User Management access restrictions
+        if hasattr(self, 'manage_btn'):
+            self.manage_btn.setVisible(self.is_admin)
+        if hasattr(self, 'users_action'):
+            self.users_action.setVisible(self.is_admin)
+
+    def open_history(self):
+        """Action handler to switch to or display History, guarded with an admin check."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can view History.")
+            return
+
+        if hasattr(self, 'stacked_widget'):
+            self.switch_tab(2, getattr(self, 'btn_hist', None))
 
     def _ensure_database_schema(self):
         """ ensure required fields exist in the Inventory and AuditLogs tables """
@@ -743,6 +895,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(brand_row)
 
         toolbar_row = QHBoxLayout()
+
         
         menu_bar = QMenuBar()
         menu_bar.setStyleSheet("""
@@ -810,6 +963,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(users_action)
 
         # View Menu
+        # View Menu - Save action to instance attribute self.action_history
         view_menu = menu_bar.addMenu("View")
 
         refresh_action = QAction("🔄 Refresh All Data", self)
@@ -829,23 +983,33 @@ class MainWindow(QMainWindow):
         inv_action.triggered.connect(lambda: self.switch_tab(1, self.btn_inv))
         view_menu.addAction(inv_action)
 
-        hist_action = QAction("📜 History & Audit Logs View", self)
-        hist_action.setShortcut(QKeySequence("Ctrl+3"))
-        hist_action.triggered.connect(lambda: self.switch_tab(2, self.btn_hist))
-        view_menu.addAction(hist_action)
+        # Assigned to self.action_history so apply_user_permissions can hide it
+        self.action_history = QAction("📜 History & Audit Logs View", self)
+        self.action_history.setShortcut(QKeySequence("Ctrl+3"))
+        self.action_history.triggered.connect(lambda: self.switch_tab(2, self.btn_hist))
+        view_menu.addAction(self.action_history)
+
+        # ... (View menu code above)
 
         toolbar_row.addWidget(menu_bar)
-        toolbar_row.addStretch()
+        toolbar_row.addStretch() # This pushes the items below to the far right
         
-        user_info = QLabel(f"👤 {self.username} - {self.user_role}")
-        user_info.setStyleSheet("font-size: 11px; color: #71717A;")
-        toolbar_row.addWidget(user_info)
+        # Change user_info to self.user_info_label
+        self.user_info_label = QLabel(f"👤 {self.username} - {self.user_role}")
+        self.user_info_label.setStyleSheet("font-size: 11px; color: #71717A;")
+        toolbar_row.addWidget(self.user_info_label)
         
-        manage_btn = QPushButton("Manage users")
-        manage_btn.setStyleSheet("border: 1px solid #D4D4D8; background: white; padding: 4px 8px; border-radius: 4px; font-size: 11px;")
-        manage_btn.clicked.connect(self.open_users)
-        toolbar_row.addWidget(manage_btn)
-        
+        self.manage_btn = QPushButton("Manage users")
+        self.manage_btn.setStyleSheet("border: 1px solid #D4D4D8; background: white; padding: 4px 8px; border-radius: 4px; font-size: 11px;")
+        self.manage_btn.clicked.connect(self.open_users)
+        toolbar_row.addWidget(self.manage_btn)
+
+        # THIS IS THE CORRECT PLACEMENT FOR THE LOGOUT BUTTON
+        self.logout_btn = QPushButton("Logout")
+        self.logout_btn.setStyleSheet("border: 1px solid #D4D4D8; background: #FEE2E2; color: #991B1B; padding: 4px 8px; border-radius: 4px; font-size: 11px;")
+        self.logout_btn.clicked.connect(self.logout)
+        toolbar_row.addWidget(self.logout_btn)
+
         layout.addLayout(toolbar_row)
         return header_frame
 
@@ -1042,11 +1206,16 @@ class MainWindow(QMainWindow):
         self.buttons.append(btn)
         return btn
 
-    def switch_tab(self, index, active_btn):
+    def switch_tab(self, index, button):
+        """Switches stacked widget view while enforcing admin role requirements."""
+        if index == 2 and not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can view History.")
+            return
+
         self.stacked_widget.setCurrentIndex(index)
-        for btn in self.buttons:
-            btn.setChecked(False)
-        active_btn.setChecked(True)
+        if hasattr(self, 'buttons'):
+            for btn in self.buttons:
+                btn.setChecked(btn == button)
 
     def _build_dashboard_tab(self):
         scroll_area = QScrollArea()
@@ -1188,6 +1357,68 @@ class MainWindow(QMainWindow):
         
         header_layout.addLayout(title_layout)
         header_layout.addStretch()
+
+        # 1. Instantiate Search Widgets
+        self.search_combo = QComboBox(self)
+        self.search_combo.addItems([
+            "All Columns", 
+            "Device Name", 
+            "Device Type", 
+            "Quantity", 
+            "Sender", 
+            "Receiver", 
+            "Date & Time Receiving", 
+            "Warranty Date", 
+            "Barcode", 
+            "Ticket Number", 
+            "From Where", 
+            "Serial Number", 
+            "Hostname", 
+            "Price Per Unit", 
+            "Total Price", 
+            "Notes"
+        ])
+        self.search_combo.setToolTip("Select column attribute to filter by")
+        self.search_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #FFFFFF;
+                color: #1F2D3D;
+                border: 1px solid #D0D5DD;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 12px;
+                min-width: 140px;
+            }
+        """)
+
+        self.search_input = QLineEdit(self)
+        self.search_input.setPlaceholderText("Search inventory... (Ctrl+F)")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #FFFFFF;
+                color: #1F2D3D;
+                border: 1px solid #D0D5DD;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 12px;
+                min-width: 180px;
+            }
+            QLineEdit:focus {
+                border-color: #0078D7;
+            }
+        """)
+
+        # 2. Add Search Widgets to header_layout
+        header_layout.addWidget(self.search_combo)
+        header_layout.addWidget(self.search_input)
+
+        # 3. Connect Signals & Keyboard Shortcut
+        self.search_input.textChanged.connect(self.filter_inventory_table)
+        self.search_combo.currentIndexChanged.connect(self.filter_inventory_table)
+
+        self.shortcut_find = QShortcut(QKeySequence("Ctrl+F"), self)
+        self.shortcut_find.activated.connect(self.focus_search_bar)
 
         # Import CSV Button
         self.btn_import_csv = QPushButton("📥 Import CSV")
@@ -1528,7 +1759,7 @@ class MainWindow(QMainWindow):
             type_data = {row[0]: row[1] for row in cursor.fetchall() if row[0]}
             self.chart_types.update_chart(type_data)
 
-            # 3. Populate Dashboard Recent Inventory Table (ORDER BY 1 sorts by 1st column)
+            # 3. Populate Dashboard Recent Inventory Table
             cursor.execute("SELECT TOP 10 * FROM Inventory ORDER BY 1 DESC")
             dash_rows = cursor.fetchall()
             dash_cols = [col[0] for col in cursor.description] if cursor.description else []
@@ -1540,16 +1771,55 @@ class MainWindow(QMainWindow):
                     val_str = f"#{val}" if c_idx == 0 else self.format_value_clean(val)
                     self.dash_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
 
-            # 4. Populate Full Inventory Table
+            # 4. Populate Full Inventory Table (Safe 15-Column Dynamic Pre-Mapping)
+            ordered_headers = [
+                "ID", "Device Name", "Device Type", "Quantity", "Sender", "Receiver",
+                "Date & Time Receiving", "Warranty Date", "Barcode", "Ticket Number", "From Where",
+                "Serial Number", "Hostname", "Price Per Unit", "Total Price", "Notes"
+            ]
+
+            # Fetch all columns dynamically to prevent SQL column name errors
             cursor.execute("SELECT * FROM Inventory ORDER BY 1 DESC")
             inv_rows = cursor.fetchall()
-            col_names = [col[0] for col in cursor.description] if cursor.description else []
-            self.inventory_table.setColumnCount(len(col_names))
-            self.inventory_table.setHorizontalHeaderLabels([self._format_key_name_helper(c) for c in col_names])
+            db_cols = [col[0].lower().replace("_", "").replace(" ", "") for col in cursor.description] if cursor.description else []
+
+            self.inventory_table.setColumnCount(len(ordered_headers))
+            self.inventory_table.setHorizontalHeaderLabels(ordered_headers)
             self.inventory_table.setRowCount(len(inv_rows))
+
+            header_aliases = {
+                0: ["id"],
+                1: ["devicename", "name", "device"],
+                2: ["devicetype", "type", "category"],
+                3: ["quantity", "qty", "count"],
+                4: ["sender", "sentby", "fromuser"],
+                5: ["receiver", "receivedby", "assignedto"],
+                6: ["receivedate", "datereceiving", "datetimereceiving", "date"],
+                7: ["warrantydate", "warranty", "expirydate"],
+                8: ["barcode", "code"],
+                9: ["ticketnumber", "ticketno", "ticket", "refnumber"],
+                10: ["fromwhere", "location", "source", "vendor"],
+                11: ["serialnumber", "serialno", "sn", "serial"],
+                12: ["hostname", "host", "computername"],
+                13: ["unitprice", "priceperunit", "price", "cost"],
+                14: ["totalprice", "totalcost", "total"],
+                15: ["note", "notes", "comments", "comment", "description"]
+            }
+
+            # Pre-calculate column index positions ONCE outside the row loop
+            col_index_map = {}
+            for target_col_idx, aliases in header_aliases.items():
+                for alias in aliases:
+                    if alias in db_cols:
+                        col_index_map[target_col_idx] = db_cols.index(alias)
+                        break
+
+            # Populate table using direct index lookups
             for r_idx, r_data in enumerate(inv_rows):
-                for c_idx, val in enumerate(r_data):
-                    val_str = f"#{val}" if c_idx == 0 else self.format_value_clean(val)
+                for c_idx in range(len(ordered_headers)):
+                    db_idx = col_index_map.get(c_idx)
+                    val = r_data[db_idx] if (db_idx is not None and db_idx < len(r_data)) else None
+                    val_str = self.format_value_clean(val)
                     self.inventory_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
 
             # 5. Populate History & Audit Table
@@ -1718,49 +1988,137 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Database Fetch Error", str(e))
 
     def open_stock_in(self):
-        dialog = StockInDialog(self)
+        """Opens Stock In dialog and refreshes all dashboard views on completion."""
+        dialog = StockInDialog(username=self.username, parent=self)
         if dialog.exec_() == QDialog.Accepted:
             self.refresh_all_data()
 
     def open_stock_out(self):
+        """Opens Stock Out dialog and refreshes all dashboard views on completion."""
         dialog = StockOutDialog(username=self.username, parent=self)
         if dialog.exec_() == QDialog.Accepted:
             self.refresh_all_data()
 
     def open_users(self):
-        dialog = UserManagementDialog(
-            current_username=self.username, 
-            current_role=self.user_role, 
-            parent=self
-        )
+        """Opens the User Management dialog with admin privileges check."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators can view or manage user accounts.")
+            return
+
+        dialog = UserManagementDialog(self.username, self.user_role, self)
         dialog.exec_()
+
+    def logout(self):
+        """Logs out the current user and returns to the login dialog."""
+        from PyQt5.QtWidgets import QMessageBox, QDialog
+        from auth import LoginDialog  # Adjust if your import path differs
+
+        confirm = QMessageBox.question(
+            self,
+            "Logout Confirmation",
+            "Are you sure you want to log out?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if confirm != QMessageBox.Yes:
+            return
+
+        # Hide the main UI while authenticating the next user
+        self.hide()
+
+        login = LoginDialog()
+        if login.exec_() == QDialog.Accepted:
+            # Update user info with the newly logged-in user's details
+            self.username = login.username
+            self.user_role = login.user_role
+            self.is_admin = str(self.user_role).strip().lower() in ['admin', 'administrator']
+
+            # Update top header label to reflect the new user
+            if hasattr(self, 'user_info_label'):
+                self.user_info_label.setText(f"👤 {self.username} - {self.user_role}")
+
+            # Update permissions and refresh UI for the new session
+            self.apply_user_permissions()
+            self.refresh_all_data()
+            self.show()
+        else:
+            # Close application if user cancels the login screen
+            self.close()
+
+    def focus_search_bar(self):
+        """Switches to inventory view if needed and focuses the search field."""
+        if hasattr(self, 'tabs'):
+            self.tabs.setCurrentIndex(1)
+            
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+
+    def filter_inventory_table(self):
+        """Filters rows in the inventory table based on query and selected column."""
+        query = self.search_input.text().strip().lower()
+        selected_attr = self.search_combo.currentText().strip().lower()
+
+        # Helper to clean string for comparison (removes spaces/symbols)
+        def clean_str(s):
+            return re.sub(r'[^a-z0-9]', '', str(s).lower())
+
+        # Determine target column index
+        target_col = -1
+        if selected_attr != "all columns":
+            cleaned_attr = clean_str(selected_attr)
+            for col in range(self.inventory_table.columnCount()):
+                header_item = self.inventory_table.horizontalHeaderItem(col)
+                if header_item and clean_str(header_item.text()) == cleaned_attr:
+                    target_col = col
+                    break
+
+        # Hide or show rows based on query match
+        for row in range(self.inventory_table.rowCount()):
+            match = False
+            if not query:
+                match = True
+            elif target_col != -1:
+                # Search within the selected column
+                item = self.inventory_table.item(row, target_col)
+                if item and query in item.text().lower():
+                    match = True
+            else:
+                # Search across all columns
+                for col in range(self.inventory_table.columnCount()):
+                    item = self.inventory_table.item(row, col)
+                    if item and query in item.text().lower():
+                        match = True
+                        break
+
+            self.inventory_table.setRowHidden(row, not match)
 
 
 if __name__ == "__main__":
-    # 1. Force Windows to display your custom icon on taskbar & title bar
-    if sys.platform == 'win32':
-        try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('itwarehouse.inventorydesk.1.0')
-        except Exception:
-            pass
-
     app = QApplication(sys.argv)
     
-    # 2. Apply custom logo icon globally (all dialogs and main window inherit this)
-    icon_path = get_resource_path("assets/logo.png")
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+    # Force application termination when all windows are closed
+    app.setQuitOnLastWindowClosed(True)
+    
+    # 1. Load absolute icon
+    app_icon = load_absolute_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
 
-    # 3. Initialize Database & Automatic Table/Column Migrations
+    # 2. Check & Initialize Database
     try:
         init_db()
     except Exception as e:
         QMessageBox.critical(None, "Startup Error", f"Failed to connect to database:\n{e}")
         sys.exit(1)
 
-    # 4. Launch Application Flow
+    # 3. Launch Login Dialog
     login = LoginDialog()
     if login.exec_() == QDialog.Accepted:
+        # Re-apply icon to process after login dialog finishes
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
+            
         main_win = MainWindow(username=login.username, user_role=login.user_role)
         main_win.show()
         sys.exit(app.exec_())

@@ -23,6 +23,12 @@ def find_logo_path():
 
 
 class LoginDialog(QDialog):
+    def get_username(self):
+        return self.username_input.text().strip()
+
+    def get_role(self):
+        # Return role retrieved from database validation
+        return self.authenticated_role
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Sign In - Inventory Desk")

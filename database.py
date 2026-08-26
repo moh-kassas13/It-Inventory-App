@@ -105,7 +105,7 @@ def connect_db(db_name="WarehouseDB", autocommit=False):
     return conn
 
 def init_db():
-    # Connect to system 'master' DB to create WarehouseDB if missing
+    # 1. Connect to system 'master' DB to create WarehouseDB if missing
     try:
         conn_master = connect_db(db_name="master", autocommit=True)
         cursor_master = conn_master.cursor()
@@ -117,10 +117,11 @@ def init_db():
     except Exception as e:
         raise RuntimeError(f"Could not check/create WarehouseDB on SQL Server instance:\n{e}")
 
-    # Connect to WarehouseDB and create/update tables
+    # 2. Connect to WarehouseDB and create/update tables
     conn = connect_db()
     cursor = conn.cursor()
     
+    # Users Table
     cursor.execute("""
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Users' and xtype='U')
         CREATE TABLE Users (
@@ -131,24 +132,30 @@ def init_db():
         )
     """)
     
+    # Inventory Table with all 15 attributes
     cursor.execute("""
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Inventory' and xtype='U')
         CREATE TABLE Inventory (
             Id INT PRIMARY KEY IDENTITY(1,1),
             DeviceName VARCHAR(100),
             DeviceType VARCHAR(50),
-            Quantity INT,
-            UnitPrice DECIMAL(18, 2) DEFAULT 0.00,
-            TotalPrice DECIMAL(18, 2) DEFAULT 0.00,
-            Barcode VARCHAR(100),
-            SerialNumber VARCHAR(100),
-            HostName VARCHAR(100),
+            Quantity INT DEFAULT 0,
+            Sender VARCHAR(100),
             Receiver VARCHAR(100),
             ReceiveDate DATE,
+            WarrantyDate VARCHAR(50),
+            Barcode VARCHAR(100),
+            TicketNumber VARCHAR(100),
+            FromWhere VARCHAR(100),
+            SerialNumber VARCHAR(100),
+            HostName VARCHAR(100),
+            UnitPrice DECIMAL(18, 2) DEFAULT 0.00,
+            TotalPrice DECIMAL(18, 2) DEFAULT 0.00,
             Note TEXT
         )
     """)
 
+    # Audit Logs Table
     cursor.execute("""
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='AuditLogs' and xtype='U')
         CREATE TABLE AuditLogs (
@@ -164,10 +171,20 @@ def init_db():
         )
     """)
 
-    # Automatic Migration: Adds missing price columns to existing Inventory table
+    # Automatic Migration: Adds any missing columns to existing Inventory table
     inventory_columns = [
+        ("Sender", "VARCHAR(100)"),
+        ("Receiver", "VARCHAR(100)"),
+        ("ReceiveDate", "DATE"),
+        ("WarrantyDate", "VARCHAR(50)"),
+        ("Barcode", "VARCHAR(100)"),
+        ("TicketNumber", "VARCHAR(100)"),
+        ("FromWhere", "VARCHAR(100)"),
+        ("SerialNumber", "VARCHAR(100)"),
+        ("HostName", "VARCHAR(100)"),
         ("UnitPrice", "DECIMAL(18, 2) DEFAULT 0.00"),
-        ("TotalPrice", "DECIMAL(18, 2) DEFAULT 0.00")
+        ("TotalPrice", "DECIMAL(18, 2) DEFAULT 0.00"),
+        ("Note", "TEXT")
     ]
     for col, col_type in inventory_columns:
         cursor.execute(f"""
@@ -188,6 +205,7 @@ def init_db():
             ALTER TABLE AuditLogs ADD {col} {col_type}
         """)
     
+    # Create default Admin user if table is empty
     cursor.execute("SELECT COUNT(*) FROM Users")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO Users (Username, Password, Role) VALUES ('admin', 'admin', 'Admin')")
