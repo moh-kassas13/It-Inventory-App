@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import QShortcut
 from PyQt5.QtGui import QKeySequence
 
 from database import init_db, get_resource_path
+from report_feature import open_report_dialog
 
 def connect_with_retry(max_retries=5, delay=3):
     """
@@ -702,13 +703,17 @@ def load_absolute_app_icon():
 # MAIN WINDOW
 # ==========================================
 class MainWindow(QMainWindow):
-    # Inside class MainWindow(QMainWindow):
     def __init__(self, username, user_role):
         super().__init__()
         self.username = username
         self.user_role = user_role
 
         self.is_admin = str(self.user_role).strip().lower() in ['admin', 'administrator']
+
+        # Cache variables for overall inventory totals
+        self.cached_total_qty = 0
+        self.cached_total_unit_price = 0.0
+        self.cached_total_price = 0.0
 
         self.setWindowTitle("Inventory Desk - Operations")
         self.setGeometry(50, 50, 1400, 850)
@@ -729,18 +734,12 @@ class MainWindow(QMainWindow):
         import matplotlib.pyplot as plt
         from PyQt5.QtWidgets import QApplication
 
-        # Close active Matplotlib plots hanging in background memory
         plt.close('all')
-
-        # Accept the event and exit the Qt application cleanly
         event.accept()
         QApplication.quit()
 
-        
     def apply_user_permissions(self):
         """Restricts UI access for non-admin accounts."""
-        
-        # History Tab/Button restrictions
         if hasattr(self, 'tab_widget'):
             for i in range(self.tab_widget.count()):
                 tab_name = self.tab_widget.tabText(i).strip().lower()
@@ -754,7 +753,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'action_history'):
             self.action_history.setVisible(self.is_admin)
 
-        # User Management access restrictions
         if hasattr(self, 'manage_btn'):
             self.manage_btn.setVisible(self.is_admin)
         if hasattr(self, 'users_action'):
@@ -775,7 +773,6 @@ class MainWindow(QMainWindow):
             conn = connect_db()
             cursor = conn.cursor()
             
-            # Additional standard columns to enforce in Inventory
             inventory_cols = [
                 ("Sender", "NVARCHAR(255)"),
                 ("WarrantyDate", "NVARCHAR(100)"),
@@ -793,7 +790,6 @@ class MainWindow(QMainWindow):
                     END
                 """)
 
-            # Ensure ReceiveDate column can store date and time
             cursor.execute("""
                 IF EXISTS (
                     SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
@@ -833,20 +829,16 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Top Header
         top_header = self._build_top_header()
         main_layout.addWidget(top_header)
 
-        # Body Layout
         body_layout = QHBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
-        # Sidebar
         sidebar = self._build_sidebar()
         body_layout.addWidget(sidebar)
 
-        # Stacked Tabs
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.addWidget(self._build_dashboard_tab()) # Index 0
         self.stacked_widget.addWidget(self._build_inventory_tab()) # Index 1
@@ -887,16 +879,31 @@ class MainWindow(QMainWindow):
         brand_row.addLayout(brand_text_layout)
         brand_row.addSpacing(20)
 
-        tab_btn = QPushButton("⚙ Operations")
-        tab_btn.setStyleSheet("background-color: #F4F4F5; border: 1px solid #E4E4E7; padding: 6px 12px; border-radius: 4px; font-weight: bold; color: #1F2D3D;")
-        brand_row.addWidget(tab_btn)
+        self.report_button = QPushButton("Generate Report")
+        self.report_button.setStyleSheet("""
+            QPushButton {
+                background-color: #F4F4F5;
+                border: 1px solid #E4E4E7;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+                color: #1F2D3D;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #E4E4E7;
+            }
+        """)
+        self.report_button.clicked.connect(
+            lambda: open_report_dialog(self, current_username=getattr(self, 'username', getattr(self, 'logged_in_user', '')))
+        )
+        brand_row.addWidget(self.report_button)
         brand_row.addStretch()
         
         layout.addLayout(brand_row)
 
         toolbar_row = QHBoxLayout()
 
-        
         menu_bar = QMenuBar()
         menu_bar.setStyleSheet("""
             QMenuBar { background-color: transparent; font-size: 11px; color: #3F3F46; }
@@ -907,7 +914,6 @@ class MainWindow(QMainWindow):
             QMenu::item:selected { background-color: #F4F4F5; }
         """)
         
-        # File Menu
         file_menu = menu_bar.addMenu("File")
         
         import_action = QAction("📥 Import Inventory (CSV)", self)
@@ -931,7 +937,6 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # Edit Menu
         edit_menu = menu_bar.addMenu("Edit")
 
         stock_in_action = QAction("↓ Stock In Item", self)
@@ -962,8 +967,6 @@ class MainWindow(QMainWindow):
         users_action.triggered.connect(self.open_users)
         edit_menu.addAction(users_action)
 
-        # View Menu
-        # View Menu - Save action to instance attribute self.action_history
         view_menu = menu_bar.addMenu("View")
 
         refresh_action = QAction("🔄 Refresh All Data", self)
@@ -983,18 +986,14 @@ class MainWindow(QMainWindow):
         inv_action.triggered.connect(lambda: self.switch_tab(1, self.btn_inv))
         view_menu.addAction(inv_action)
 
-        # Assigned to self.action_history so apply_user_permissions can hide it
         self.action_history = QAction("📜 History & Audit Logs View", self)
         self.action_history.setShortcut(QKeySequence("Ctrl+3"))
         self.action_history.triggered.connect(lambda: self.switch_tab(2, self.btn_hist))
         view_menu.addAction(self.action_history)
 
-        # ... (View menu code above)
-
         toolbar_row.addWidget(menu_bar)
-        toolbar_row.addStretch() # This pushes the items below to the far right
+        toolbar_row.addStretch()
         
-        # Change user_info to self.user_info_label
         self.user_info_label = QLabel(f"👤 {self.username} - {self.user_role}")
         self.user_info_label.setStyleSheet("font-size: 11px; color: #71717A;")
         toolbar_row.addWidget(self.user_info_label)
@@ -1004,7 +1003,6 @@ class MainWindow(QMainWindow):
         self.manage_btn.clicked.connect(self.open_users)
         toolbar_row.addWidget(self.manage_btn)
 
-        # THIS IS THE CORRECT PLACEMENT FOR THE LOGOUT BUTTON
         self.logout_btn = QPushButton("Logout")
         self.logout_btn.setStyleSheet("border: 1px solid #D4D4D8; background: #FEE2E2; color: #991B1B; padding: 4px 8px; border-radius: 4px; font-size: 11px;")
         self.logout_btn.clicked.connect(self.logout)
@@ -1358,7 +1356,6 @@ class MainWindow(QMainWindow):
         header_layout.addLayout(title_layout)
         header_layout.addStretch()
 
-        # 1. Instantiate Search Widgets
         self.search_combo = QComboBox(self)
         self.search_combo.addItems([
             "All Columns", 
@@ -1409,24 +1406,20 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        # 2. Add Search Widgets to header_layout
         header_layout.addWidget(self.search_combo)
         header_layout.addWidget(self.search_input)
 
-        # 3. Connect Signals & Keyboard Shortcut
         self.search_input.textChanged.connect(self.filter_inventory_table)
         self.search_combo.currentIndexChanged.connect(self.filter_inventory_table)
 
         self.shortcut_find = QShortcut(QKeySequence("Ctrl+F"), self)
         self.shortcut_find.activated.connect(self.focus_search_bar)
 
-        # Import CSV Button
         self.btn_import_csv = QPushButton("📥 Import CSV")
         self.btn_import_csv.setStyleSheet("background-color: #FFFFFF; color: #1F2D3D; border: 1px solid #D0D5DD; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
         self.btn_import_csv.clicked.connect(self.import_csv)
         header_layout.addWidget(self.btn_import_csv)
 
-        # Export CSV Button (Placed side-by-side with Import CSV)
         self.btn_export_csv = QPushButton("📤 Export CSV")
         self.btn_export_csv.setStyleSheet("background-color: #FFFFFF; color: #1F2D3D; border: 1px solid #D0D5DD; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
         self.btn_export_csv.clicked.connect(self.export_to_csv)
@@ -1447,6 +1440,40 @@ class MainWindow(QMainWindow):
             
         header_layout.addWidget(self.btn_delete_inventory)
         layout.addLayout(header_layout)
+
+        summary_frame = QFrame()
+        summary_frame.setStyleSheet("""
+            QFrame {
+                background-color: #FFFFFF;
+                border: 1px solid #E4E4E7;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QLabel {
+                border: none;
+            }
+        """)
+        summary_layout = QHBoxLayout(summary_frame)
+        summary_layout.setContentsMargins(15, 8, 15, 8)
+        summary_layout.setSpacing(25)
+
+        self.lbl_total_qty = QLabel("Total Quantity: <b>0</b>")
+        self.lbl_total_qty.setStyleSheet("font-size: 13px; color: #1F2D3D;")
+        
+        self.lbl_total_unit_price = QLabel("Total Unit Price: <b>$0.00</b>")
+        self.lbl_total_unit_price.setStyleSheet("font-size: 13px; color: #1F2D3D;")
+        
+        self.lbl_total_total_price = QLabel("Total Price: <b>$0.00</b>")
+        self.lbl_total_total_price.setStyleSheet("font-size: 13px; color: #101828; font-weight: bold;")
+
+        summary_layout.addWidget(self.lbl_total_qty)
+        summary_layout.addWidget(QLabel("<span style='color:#D4D4D8;'>|</span>"))
+        summary_layout.addWidget(self.lbl_total_unit_price)
+        summary_layout.addWidget(QLabel("<span style='color:#D4D4D8;'>|</span>"))
+        summary_layout.addWidget(self.lbl_total_total_price)
+        summary_layout.addStretch()
+
+        layout.addWidget(summary_frame)
         
         self.inventory_table = QTableWidget(0, 0)
         self.inventory_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -1728,8 +1755,63 @@ class MainWindow(QMainWindow):
         layout.addWidget(lbl_sub)
         return frame
 
+    def _recalculate_cached_totals(self):
+        """Calculates and stores total stats in cache to eliminate lag upon tab switching."""
+        qty_col = 3
+        unit_price_col = 13
+        total_price_col = 14
+
+        total_qty = 0
+        total_unit_price = 0.0
+        total_price = 0.0
+
+        for row in range(self.inventory_table.rowCount()):
+            row_qty = 0
+            row_unit_price = 0.0
+            row_total_price = 0.0
+
+            if self.inventory_table.columnCount() > qty_col:
+                item = self.inventory_table.item(row, qty_col)
+                if item and item.text().strip():
+                    digits = ''.join(filter(str.isdigit, item.text()))
+                    if digits:
+                        row_qty = int(digits)
+                        total_qty += row_qty
+
+            if self.inventory_table.columnCount() > unit_price_col:
+                item = self.inventory_table.item(row, unit_price_col)
+                if item and item.text().strip():
+                    val_str = item.text().replace(',', '').replace('$', '').strip()
+                    try:
+                        match = re.search(r'\d+(\.\d+)?', val_str)
+                        if match:
+                            row_unit_price = float(match.group())
+                            total_unit_price += row_unit_price
+                    except Exception:
+                        pass
+
+            if self.inventory_table.columnCount() > total_price_col:
+                item = self.inventory_table.item(row, total_price_col)
+                if item and item.text().strip():
+                    val_str = item.text().replace(',', '').replace('$', '').strip()
+                    try:
+                        match = re.search(r'\d+(\.\d+)?', val_str)
+                        if match:
+                            row_total_price = float(match.group())
+                    except Exception:
+                        pass
+
+            if row_total_price == 0.0 and row_qty > 0 and row_unit_price > 0:
+                row_total_price = row_qty * row_unit_price
+
+            total_price += row_total_price
+
+        self.cached_total_qty = total_qty
+        self.cached_total_unit_price = total_unit_price
+        self.cached_total_price = total_price
+
     def refresh_all_data(self):
-        """Refreshes KPI statistics, charts, and table views across all dashboard tabs."""
+        """Refreshes KPI statistics, charts, table views, and caches overall totals."""
         conn = None
         try:
             conn = connect_db()
@@ -1771,14 +1853,13 @@ class MainWindow(QMainWindow):
                     val_str = f"#{val}" if c_idx == 0 else self.format_value_clean(val)
                     self.dash_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
 
-            # 4. Populate Full Inventory Table (Safe 15-Column Dynamic Pre-Mapping)
+            # 4. Populate Full Inventory Table
             ordered_headers = [
                 "ID", "Device Name", "Device Type", "Quantity", "Sender", "Receiver",
                 "Date & Time Receiving", "Warranty Date", "Barcode", "Ticket Number", "From Where",
                 "Serial Number", "Hostname", "Price Per Unit", "Total Price", "Notes"
             ]
 
-            # Fetch all columns dynamically to prevent SQL column name errors
             cursor.execute("SELECT * FROM Inventory ORDER BY 1 DESC")
             inv_rows = cursor.fetchall()
             db_cols = [col[0].lower().replace("_", "").replace(" ", "") for col in cursor.description] if cursor.description else []
@@ -1806,7 +1887,6 @@ class MainWindow(QMainWindow):
                 15: ["note", "notes", "comments", "comment", "description"]
             }
 
-            # Pre-calculate column index positions ONCE outside the row loop
             col_index_map = {}
             for target_col_idx, aliases in header_aliases.items():
                 for alias in aliases:
@@ -1814,7 +1894,6 @@ class MainWindow(QMainWindow):
                         col_index_map[target_col_idx] = db_cols.index(alias)
                         break
 
-            # Populate table using direct index lookups
             for r_idx, r_data in enumerate(inv_rows):
                 for c_idx in range(len(ordered_headers)):
                     db_idx = col_index_map.get(c_idx)
@@ -1833,6 +1912,10 @@ class MainWindow(QMainWindow):
                 for c_idx, val in enumerate(r_data):
                     val_str = f"#{val}" if c_idx == 0 else self.format_value_clean(val)
                     self.history_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
+
+            # Recalculate and cache totals upon complete table reload
+            self._recalculate_cached_totals()
+            self.update_inventory_totals()
 
         except Exception as e:
             QMessageBox.critical(self, "Data Refresh Error", f"Failed to refresh data from SQL database:\n{e}")
@@ -1950,6 +2033,9 @@ class MainWindow(QMainWindow):
                         item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                     self.inventory_table.setItem(row_idx, new_col_idx, item)
             conn.close()
+            
+            self._recalculate_cached_totals()
+            self.update_inventory_totals()
         except Exception as e:
             QMessageBox.critical(self, "Database Fetch Error", str(e))
 
@@ -2011,7 +2097,7 @@ class MainWindow(QMainWindow):
     def logout(self):
         """Logs out the current user and returns to the login dialog."""
         from PyQt5.QtWidgets import QMessageBox, QDialog
-        from auth import LoginDialog  # Adjust if your import path differs
+        from auth import LoginDialog
 
         confirm = QMessageBox.question(
             self,
@@ -2024,26 +2110,21 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        # Hide the main UI while authenticating the next user
         self.hide()
 
         login = LoginDialog()
         if login.exec_() == QDialog.Accepted:
-            # Update user info with the newly logged-in user's details
             self.username = login.username
             self.user_role = login.user_role
             self.is_admin = str(self.user_role).strip().lower() in ['admin', 'administrator']
 
-            # Update top header label to reflect the new user
             if hasattr(self, 'user_info_label'):
                 self.user_info_label.setText(f"👤 {self.username} - {self.user_role}")
 
-            # Update permissions and refresh UI for the new session
             self.apply_user_permissions()
             self.refresh_all_data()
             self.show()
         else:
-            # Close application if user cancels the login screen
             self.close()
 
     def focus_search_bar(self):
@@ -2055,36 +2136,26 @@ class MainWindow(QMainWindow):
         self.search_input.selectAll()
 
     def filter_inventory_table(self):
-        """Filters rows in the inventory table based on query and selected column."""
         query = self.search_input.text().strip().lower()
-        selected_attr = self.search_combo.currentText().strip().lower()
+        search_col_name = self.search_combo.currentText()
 
-        # Helper to clean string for comparison (removes spaces/symbols)
-        def clean_str(s):
-            return re.sub(r'[^a-z0-9]', '', str(s).lower())
-
-        # Determine target column index
         target_col = -1
-        if selected_attr != "all columns":
-            cleaned_attr = clean_str(selected_attr)
+        if search_col_name != "All Columns":
             for col in range(self.inventory_table.columnCount()):
                 header_item = self.inventory_table.horizontalHeaderItem(col)
-                if header_item and clean_str(header_item.text()) == cleaned_attr:
+                if header_item and header_item.text().strip().lower() == search_col_name.strip().lower():
                     target_col = col
                     break
 
-        # Hide or show rows based on query match
         for row in range(self.inventory_table.rowCount()):
             match = False
             if not query:
                 match = True
             elif target_col != -1:
-                # Search within the selected column
                 item = self.inventory_table.item(row, target_col)
                 if item and query in item.text().lower():
                     match = True
             else:
-                # Search across all columns
                 for col in range(self.inventory_table.columnCount()):
                     item = self.inventory_table.item(row, col)
                     if item and query in item.text().lower():
@@ -2092,6 +2163,74 @@ class MainWindow(QMainWindow):
                         break
 
             self.inventory_table.setRowHidden(row, not match)
+
+        self.update_inventory_totals()
+
+    def update_inventory_totals(self):
+        """Uses cached totals for unfiltered inventory, recalculates dynamically when search filter active."""
+        query = self.search_input.text().strip() if hasattr(self, 'search_input') else ""
+
+        if not query:
+            total_qty = getattr(self, 'cached_total_qty', 0)
+            total_unit_price = getattr(self, 'cached_total_unit_price', 0.0)
+            total_price = getattr(self, 'cached_total_price', 0.0)
+        else:
+            qty_col = 3
+            unit_price_col = 13
+            total_price_col = 14
+
+            total_qty = 0
+            total_unit_price = 0.0
+            total_price = 0.0
+
+            for row in range(self.inventory_table.rowCount()):
+                if not self.inventory_table.isRowHidden(row):
+                    row_qty = 0
+                    row_unit_price = 0.0
+                    row_total_price = 0.0
+
+                    if self.inventory_table.columnCount() > qty_col:
+                        item = self.inventory_table.item(row, qty_col)
+                        if item and item.text().strip():
+                            digits = ''.join(filter(str.isdigit, item.text()))
+                            if digits:
+                                row_qty = int(digits)
+                                total_qty += row_qty
+
+                    if self.inventory_table.columnCount() > unit_price_col:
+                        item = self.inventory_table.item(row, unit_price_col)
+                        if item and item.text().strip():
+                            val_str = item.text().replace(',', '').replace('$', '').strip()
+                            try:
+                                match = re.search(r'\d+(\.\d+)?', val_str)
+                                if match:
+                                    row_unit_price = float(match.group())
+                                    total_unit_price += row_unit_price
+                            except Exception:
+                                pass
+
+                    if self.inventory_table.columnCount() > total_price_col:
+                        item = self.inventory_table.item(row, total_price_col)
+                        if item and item.text().strip():
+                            val_str = item.text().replace(',', '').replace('$', '').strip()
+                            try:
+                                match = re.search(r'\d+(\.\d+)?', val_str)
+                                if match:
+                                    row_total_price = float(match.group())
+                            except Exception:
+                                pass
+
+                    if row_total_price == 0.0 and row_qty > 0 and row_unit_price > 0:
+                        row_total_price = row_qty * row_unit_price
+
+                    total_price += row_total_price
+
+        if hasattr(self, 'lbl_total_qty'):
+            self.lbl_total_qty.setText(f"Total Quantity: <b>{total_qty:,}</b>")
+        if hasattr(self, 'lbl_total_unit_price'):
+            self.lbl_total_unit_price.setText(f"Total Unit Price: <b>${total_unit_price:,.2f}</b>")
+        if hasattr(self, 'lbl_total_total_price'):
+            self.lbl_total_total_price.setText(f"Total Price: <b>${total_price:,.2f}</b>")
 
 
 if __name__ == "__main__":
