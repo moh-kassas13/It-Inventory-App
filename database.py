@@ -90,6 +90,7 @@ def connect_db(db_name="WarehouseDB", autocommit=False):
         f"{extra_params}"
     )
 
+
     try:
         conn = pyodbc.connect(conn_str)
     except pyodbc.Error:
@@ -163,10 +164,6 @@ def init_db():
             Username VARCHAR(50),
             ActionType VARCHAR(50),
             Timestamp DATETIME DEFAULT GETDATE(),
-            Sender VARCHAR(100),
-            WarrantyDate VARCHAR(50),
-            TicketNumber VARCHAR(100),
-            FromWhere VARCHAR(100),
             Details TEXT
         )
     """)

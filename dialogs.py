@@ -389,7 +389,7 @@ class StockInDialog(QDialog):
 
         # 8. Barcode Number *
         self.txt_barcode = QLineEdit()
-        self.txt_barcode.setPlaceholderText("Asset tag or barcode scan")
+        self.txt_barcode.setPlaceholderText("Scan barcode (Zebra DS4308) or type manually...")
         self._style_input(self.txt_barcode)
 
         # 9. Ticket Number

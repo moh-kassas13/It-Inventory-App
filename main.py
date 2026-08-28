@@ -3,16 +3,35 @@ import ctypes
 import os
 import csv
 import re
+import time
 from datetime import datetime, date
 
-import time
 import pyodbc
-from dialogs import ExportDialog
-from PyQt5.QtWidgets import QShortcut
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QTableWidget, QTableWidgetItem, QHeaderView, QPushButton, QLabel,
+    QFrame, QMessageBox, QDialog, QScrollArea, QAbstractItemView,
+    QStackedWidget, QMenuBar, QAction, QLineEdit, QComboBox,
+    QFileDialog, QFormLayout, QGroupBox, QCheckBox, QDateEdit,
+    QShortcut, QSizePolicy
+)
+from PyQt5.QtCore import Qt, QDate
+from PyQt5.QtGui import QIcon, QPixmap, QKeySequence, QTextDocument
+from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
 
-from database import init_db, get_resource_path
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+from database import init_db, connect_db, log_audit, get_resource_path
+from auth import LoginDialog, find_logo_path
+from dialogs import StockInDialog, StockOutDialog, ExportDialog
 from report_feature import open_report_dialog
+
+# Force Windows Taskbar to use custom icon
+if sys.platform == 'win32':
+    myappid = 'aubmc.itwarehouse.app.3.0'
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
 
 def connect_with_retry(max_retries=5, delay=3):
     """
@@ -28,356 +47,28 @@ def connect_with_retry(max_retries=5, delay=3):
     
     for attempt in range(1, max_retries + 1):
         try:
-            # Set a low connection timeout per attempt
             connection = pyodbc.connect(conn_str, timeout=5)
             return connection
         except pyodbc.Error as e:
             if attempt < max_retries:
                 time.sleep(delay)
             else:
-                raise e  # Fail gracefully after all retries are exhausted
-
-# Force Windows to assign custom taskbar and title bar icons
-if sys.platform == 'win32':
-    myappid = 'itwarehouse.inventorydesk.app.1.0' 
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QHeaderView, QPushButton, QLabel,
-    QFrame, QMessageBox, QDialog, QScrollArea, QAbstractItemView,
-    QStackedWidget, QMenuBar, QAction, QLineEdit, QComboBox,
-    QFileDialog, QFormLayout, QRadioButton, QGroupBox, QCheckBox, QDateEdit
-)
-from PyQt5.QtCore import Qt, QDate
-from PyQt5.QtGui import QIcon, QPixmap, QKeySequence, QTextDocument
-from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
-
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-
-from database import get_resource_path, init_db, connect_db, log_audit
-from auth import LoginDialog, find_logo_path
-from dialogs import StockInDialog, StockOutDialog
-
-# Force Windows Taskbar to use custom icon
-myappid = 'aubmc.itwarehouse.app.3.0'
-ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-
-def export_to_csv(self):
-    dialog = ExportDialog(username=self.username, parent=self)
-    
-    # Check if the user clicked "Export CSV" (QDialog.Accepted)
-    if dialog.exec_() == QDialog.Accepted:
-        selected_table = dialog.cbo_table.currentText()
-        
-        # 1. Open system file picker window
-        default_name = f"{selected_table.lower().replace(' ', '_')}_export.csv"
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, 
-            "Save CSV File", 
-            default_name, 
-            "CSV Files (*.csv);;All Files (*)"
-        )
-        
-        # If user cancels the file dialog, stop execution
-        if not file_path:
-            return
-
-        # 2. Query database and write to CSV
-        try:
-            conn = connect_db()
-            cursor = conn.cursor()
-            
-            # Map selection to database table
-            db_table = "Inventory" if selected_table == "Inventory" else "AuditLog"
-            cursor.execute(f"SELECT * FROM {db_table}")
-            
-            rows = cursor.fetchall()
-            headers = [column[0] for column in cursor.description]
-            conn.close()
-
-            # Write data rows to file
-            with open(file_path, mode='w', newline='', encoding='utf-8') as csv_file:
-                writer = csv.writer(csv_file)
-                writer.writerow(headers)
-                writer.writerows(rows)
-
-            QMessageBox.information(
-                self, 
-                "Export Successful", 
-                f"Data successfully exported to:\n{file_path}"
-            )
-
-        except Exception as e:
-            QMessageBox.critical(
-                self, 
-                "Export Error", 
-                f"Failed to export data to CSV:\n{e}"
-            )
+                raise e
 
 
-def _add_new_device_name(self):
-    """Prompt user to add a new device name dynamically."""
-    from PyQt5.QtWidgets import QInputDialog, QMessageBox
-
-    text, ok = QInputDialog.getText(self, "Add Device Name", "Enter new Device Name:")
-    if ok and text.strip():
-        new_name = text.strip()
-        index = self.cbo_device_name.findText(new_name, Qt.MatchExactly)
-        if index < 0:
-            self.cbo_device_name.addItem(new_name)
-            self.cbo_device_name.setCurrentText(new_name)
-        else:
-            self.cbo_device_name.setCurrentIndex(index)
-
-    def _init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
-
-        # Title
-        title = QLabel("Export Options")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #101828;")
-        layout.addWidget(title)
-
-        subtitle = QLabel("Select whether to export all inventory records or apply custom filters.")
-        subtitle.setStyleSheet("font-size: 12px; color: #667085;")
-        layout.addWidget(subtitle)
-
-        # Mode Selection (Radio buttons)
-        mode_box = QGroupBox("Export Mode")
-        mode_box.setStyleSheet("QGroupBox { font-weight: bold; color: #101828; border: 1px solid #E4E4E7; border-radius: 6px; margin-top: 6px; padding-top: 10px; }")
-        mode_layout = QVBoxLayout(mode_box)
-
-        self.rb_export_all = QRadioButton("Export All Data")
-        self.rb_export_all.setChecked(True)
-        self.rb_export_all.setStyleSheet("font-size: 13px; font-weight: bold; color: #1F2D3D;")
-        self.rb_export_all.toggled.connect(self._toggle_filter_options)
-
-        self.rb_export_filtered = QRadioButton("Export Filtered Data")
-        self.rb_export_filtered.setStyleSheet("font-size: 13px; font-weight: bold; color: #1F2D3D;")
-
-        mode_layout.addWidget(self.rb_export_all)
-        mode_layout.addWidget(self.rb_export_filtered)
-        layout.addWidget(mode_box)
-
-        # Filter Options Group
-        self.filter_box = QGroupBox("Filter Criteria")
-        self.filter_box.setEnabled(False)
-        self.filter_box.setStyleSheet("QGroupBox { font-weight: bold; color: #101828; border: 1px solid #E4E4E7; border-radius: 6px; margin-top: 6px; padding-top: 10px; }")
-        filter_layout = QFormLayout(self.filter_box)
-        filter_layout.setSpacing(10)
-
-        # 1. Device Name (Dropdown + Add Button)
-        dev_name_layout = QHBoxLayout()
-        dev_name_layout.setSpacing(6)
-
-        self.cbo_device_name = QComboBox()
-        self.cbo_device_name.setStyleSheet("padding: 6px; border: 1px solid #D0D5DD; border-radius: 4px; background: white;")
-        self._populate_device_names()  # Populates existing names from DB
-
-        btn_add_device_name = QPushButton("+")
-        btn_add_device_name.setFixedWidth(32)
-        btn_add_device_name.setToolTip("Add new Device Name")
-        btn_add_device_name.setStyleSheet("""
-            QPushButton {
-                background-color: #1F2D3D; 
-                color: white; 
-                font-weight: bold; 
-                font-size: 14px; 
-                border-radius: 4px; 
-                padding: 4px;
-            }
-            QPushButton:hover { background-color: #34495E; }
-        """)
-        btn_add_device_name.clicked.connect(self._add_new_device_name)
-
-        dev_name_layout.addWidget(self.cbo_device_name, stretch=1)
-        dev_name_layout.addWidget(btn_add_device_name)
-
-        filter_layout.addRow(QLabel("Device Name:"), dev_name_layout)
-
-        # 2. Device Type
-        self.combo_device_type = QComboBox()
-        self.combo_device_type.setStyleSheet("padding: 6px; border: 1px solid #D0D5DD; border-radius: 4px; background: white;")
-        filter_layout.addRow(QLabel("Device Type:"), self.combo_device_type)
-
-        # 3. Time Frame (Receive Date)
-        self.chk_enable_dates = QCheckBox("Filter by Receive Date Range")
-        self.chk_enable_dates.setStyleSheet("font-weight: normal; font-size: 12px; color: #3F3F46;")
-        self.chk_enable_dates.toggled.connect(self._toggle_date_inputs)
-
-        date_layout = QHBoxLayout()
-        self.date_start = QDateEdit()
-        self.date_start.setCalendarPopup(True)
-        self.date_start.setDate(QDate.currentDate().addMonths(-1))
-        self.date_start.setStyleSheet("padding: 5px; border: 1px solid #D0D5DD; border-radius: 4px; background: white;")
-        self.date_start.setEnabled(False)
-
-        self.date_end = QDateEdit()
-        self.date_end.setCalendarPopup(True)
-        self.date_end.setDate(QDate.currentDate())
-        self.date_end.setStyleSheet("padding: 5px; border: 1px solid #D0D5DD; border-radius: 4px; background: white;")
-        self.date_end.setEnabled(False)
-
-        date_layout.addWidget(QLabel("From:"))
-        date_layout.addWidget(self.date_start)
-        date_layout.addWidget(QLabel("To:"))
-        date_layout.addWidget(self.date_end)
-
-        filter_layout.addRow(self.chk_enable_dates)
-        filter_layout.addRow(date_layout)
-
-        layout.addWidget(self.filter_box)
-
-        # Buttons
-
-        self.btn_logout = QPushButton("Logout", self)
-        self.btn_logout.clicked.connect(self.logout)
-
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        btn_cancel = QPushButton("Cancel")
-        btn_cancel.setStyleSheet("background-color: #F4F4F5; color: #18181B; border: 1px solid #D4D4D8; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
-        btn_cancel.clicked.connect(self.reject)
-
-        btn_export = QPushButton("📤 Export to CSV")
-        btn_export.setStyleSheet("background-color: #1F2D3D; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
-        btn_export.clicked.connect(self.process_export)
-
-        btn_layout.addWidget(btn_cancel)
-        btn_layout.addWidget(btn_export)
-        layout.addLayout(btn_layout)
-
-
-    def logout(self):
-        """Logs out the current user and prompts for new credentials without quitting."""
-        from PyQt5.QtWidgets import QMessageBox, QDialog
-        from auth import LoginDialog # Make sure this matches your login import
-        
-        confirm = QMessageBox.question(
-            self,
-            "Logout Confirmation",
-            "Are you sure you want to log out?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if confirm != QMessageBox.Yes:
-            return
-
-        # Hide the main window
-        self.hide()
-
-        # Re-launch the login dialog
-        login_dialog = LoginDialog()
-        
-        if login_dialog.exec_() == QDialog.Accepted:
-            # Update credentials based on your LoginDialog properties
-            self.username = login_dialog.username
-            self.user_role = login_dialog.user_role
-            self.is_admin = str(self.user_role).strip().lower() in ['admin', 'administrator']
-
-            # Re-apply permissions and refresh data for the new user
-            self.apply_user_permissions()
-            self.refresh_all_data()
-            
-            # Show the window again
-            self.show()
-        else:
-            # If they cancel the login screen, close the application entirely
-            self.close()
-
-
-    def _toggle_filter_options(self, checked):
-        self.filter_box.setEnabled(not checked)
-
-    def _toggle_date_inputs(self, checked):
-        self.date_start.setEnabled(checked)
-        self.date_end.setEnabled(checked)
-
-    def _populate_device_types(self):
-        try:
-            conn = connect_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT DeviceType FROM Inventory WHERE DeviceType IS NOT NULL AND DeviceType <> ''")
-            types = [row[0] for row in cursor.fetchall()]
-            conn.close()
-
-            self.combo_device_type.addItem("-- All Types --")
-            for t in sorted(types):
-                self.combo_device_type.addItem(t)
-        except Exception:
-            self.combo_device_type.addItem("-- All Types --")
-
-    def process_export(self):
-        # Open save file dialog
-        file_path, _ = QFileDialog.getSaveFileName(self, "Save Inventory Export", "inventory_export.csv", "CSV Files (*.csv)")
-        if not file_path:
-            return
-
-        try:
-            conn = connect_db()
-            cursor = conn.cursor()
-
-            query = "SELECT * FROM Inventory WHERE 1=1"
-            params = []
-            filter_descriptions = []
-
-            # Construct query based on export mode
-            if self.rb_export_filtered.isChecked():
-                # Filter by Device Name
-                name_filter = self.input_device_name.text().strip()
-                if name_filter:
-                    query += " AND DeviceName LIKE ?"
-                    params.append(f"%{name_filter}%")
-                    filter_descriptions.append(f"Name containing '{name_filter}'")
-
-                # Filter by Device Type
-                selected_type = self.combo_device_type.currentText()
-                if selected_type and selected_type != "-- All Types --":
-                    query += " AND DeviceType = ?"
-                    params.append(selected_type)
-                    filter_descriptions.append(f"Type '{selected_type}'")
-
-                # Filter by Time Frame (Receive Date)
-                if self.chk_enable_dates.isChecked():
-                    start_str = self.date_start.date().toString("yyyy-MM-dd")
-                    end_str = self.date_end.date().toString("yyyy-MM-dd") + " 23:59:59"
-                    query += " AND ReceiveDate >= ? AND ReceiveDate <= ?"
-                    params.extend([start_str, end_str])
-                    filter_descriptions.append(f"Date range {start_str} to {self.date_end.date().toString('yyyy-MM-dd')}")
-
-            query += " ORDER BY Id DESC"
-
-            cursor.execute(query, params)
-            columns = [col[0] for col in cursor.description] if cursor.description else []
-            rows = cursor.fetchall()
-            conn.close()
-
-            if not rows:
-                QMessageBox.warning(self, "Export Warning", "No inventory records matched your selected export criteria.")
-                return
-
-            with open(file_path, mode='w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(columns)
-                writer.writerows(rows)
-
-            desc = ", ".join(filter_descriptions) if filter_descriptions else "All Records"
-            log_audit(self.username, "EXPORT_CSV", f"Exported {len(rows)} record(s) to CSV ({desc})")
-
-            QMessageBox.information(
-                self, 
-                "Export Successful", 
-                f"Successfully exported {len(rows)} record(s) to:\n{file_path}"
-            )
-            self.accept()
-
-        except Exception as e:
-            QMessageBox.critical(self, "Export Failed", f"An error occurred while exporting data:\n{e}")
+def load_absolute_app_icon():
+    """Locates and returns the application icon using strict absolute path resolution."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "assets", "logo.ico"),
+        os.path.join(base_dir, "assets", "logo.png"),
+        os.path.join(base_dir, "logo.ico"),
+        os.path.join(base_dir, "logo.png"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return QIcon(path)
+    return QIcon()
 
 
 # ==========================================
@@ -390,7 +81,6 @@ class UserManagementDialog(QDialog):
         self.current_role = str(current_role).strip().lower()
         self.is_admin = self.current_role in ['admin', 'administrator']
 
-        # Block non-admins at dialog launch
         if not self.is_admin:
             QMessageBox.warning(parent or self, "Access Denied", "Only administrators can access user management.")
             self.reject()
@@ -411,7 +101,6 @@ class UserManagementDialog(QDialog):
         title.setStyleSheet("font-size: 18px; font-weight: bold; color: #101828;")
         layout.addWidget(title)
 
-        # User Table
         self.user_table = QTableWidget(0, 3)
         self.user_table.setHorizontalHeaderLabels(["ID", "USERNAME", "ROLE"])
         self.user_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -425,17 +114,15 @@ class UserManagementDialog(QDialog):
         """)
         layout.addWidget(self.user_table)
         
-        # Delete User Button (Admin Only)
         self.btn_delete = QPushButton("🗑 Delete Selected User")
         self.btn_delete.setStyleSheet("background-color: #EF4444; color: white; border: none; padding: 6px 14px; border-radius: 4px; font-weight: bold;")
         self.btn_delete.clicked.connect(self.delete_user)
         
-        if self.current_role != "Admin":
+        if not self.is_admin:
             self.btn_delete.hide()
             
         layout.addWidget(self.btn_delete, alignment=Qt.AlignRight)
 
-        # Form to create a new user
         form_frame = QFrame()
         form_frame.setStyleSheet("background-color: #F9FAFB; border: 1px solid #E4E4E7; border-radius: 6px;")
         form_layout = QHBoxLayout(form_frame)
@@ -467,6 +154,7 @@ class UserManagementDialog(QDialog):
         layout.addWidget(form_frame)
 
     def load_users(self):
+        conn = None
         try:
             conn = connect_db()
             cursor = conn.cursor()
@@ -494,9 +182,11 @@ class UserManagementDialog(QDialog):
                     if col_idx == 0:
                         item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
                     self.user_table.setItem(row_idx, col_idx, item)
-            conn.close()
         except Exception as e:
             QMessageBox.critical(self, "Database Error", str(e))
+        finally:
+            if conn:
+                conn.close()
 
     def add_user(self):
         username = self.input_user.text().strip()
@@ -507,12 +197,12 @@ class UserManagementDialog(QDialog):
             QMessageBox.warning(self, "Validation Error", "Username and Password cannot be empty.")
             return
 
+        conn = None
         try:
             conn = connect_db()
             cursor = conn.cursor()
             cursor.execute("INSERT INTO Users (Username, Password, Role) VALUES (?, ?, ?)", (username, password, role))
             conn.commit()
-            conn.close()
 
             log_audit(self.current_username, "USER_ADD", f"Created user '{username}' with role '{role}'")
             QMessageBox.information(self, "Success", f"User '{username}' added successfully!")
@@ -522,6 +212,9 @@ class UserManagementDialog(QDialog):
             self.load_users()
         except Exception as e:
             QMessageBox.critical(self, "Error Adding User", f"Could not add user. Username may already exist.\n\nError: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def delete_user(self):
         selected_row = self.user_table.currentRow()
@@ -539,18 +232,21 @@ class UserManagementDialog(QDialog):
         reply = QMessageBox.question(self, "Confirm Deletion", f"Are you sure you want to permanently delete the user '{username}'?", QMessageBox.Yes | QMessageBox.No)
         
         if reply == QMessageBox.Yes:
+            conn = None
             try:
                 conn = connect_db()
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM Users WHERE Id = ?", (user_id,))
                 conn.commit()
-                conn.close()
 
                 log_audit(self.current_username, "USER_DELETE", f"Deleted user '{username}'")
                 QMessageBox.information(self, "Success", f"User '{username}' was deleted.")
                 self.load_users()
             except Exception as e:
                 QMessageBox.critical(self, "Database Error", f"Failed to delete user:\n{e}")
+            finally:
+                if conn:
+                    conn.close()
 
 
 # ==========================================
@@ -614,8 +310,6 @@ class ItemDetailsDialog(QDialog):
 # ==========================================
 # CHARTS
 # ==========================================
-from PyQt5.QtWidgets import QSizePolicy
-
 class DonutChartCanvas(FigureCanvas):
     def __init__(self, parent=None, width=4, height=3, dpi=100):
         fig = Figure(figsize=(width, height), dpi=dpi)
@@ -625,7 +319,6 @@ class DonutChartCanvas(FigureCanvas):
         super(DonutChartCanvas, self).__init__(fig)
         self.setStyleSheet("background-color: transparent;")
 
-        # Enable auto-scaling with window resizes
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.updateGeometry()
 
@@ -637,7 +330,6 @@ class DonutChartCanvas(FigureCanvas):
             self.draw()
             return
 
-        # 1. Group smaller categories into 'Other' to eliminate thin, messy slices
         sorted_items = sorted(data_dict.items(), key=lambda x: x[1], reverse=True)
         if len(sorted_items) > max_items:
             top_items = dict(sorted_items[:max_items - 1])
@@ -650,7 +342,6 @@ class DonutChartCanvas(FigureCanvas):
         
         colors = ['#3B5998', '#D97757', '#5C8A8A', '#D9A05B', '#6B5B95', '#88B04B', '#94A3B8']
 
-        # 2. Render Donut Slices
         wedges, _ = self.axes.pie(
             sizes, 
             colors=colors[:len(sizes)], 
@@ -658,11 +349,9 @@ class DonutChartCanvas(FigureCanvas):
             wedgeprops=dict(width=0.28, edgecolor='#FFFFFF', linewidth=2)
         )
 
-        # 3. Center Text
         self.axes.text(0, 0.05, f"{total:,}", horizontalalignment='center', verticalalignment='center', fontsize=16, fontweight='bold', color="#101828")
         self.axes.text(0, -0.12, "units", horizontalalignment='center', verticalalignment='center', fontsize=9, color="#667085")
         
-        # 4. Position Legend safely outside the pie
         legend_labels = [f"{lbl} ({val})" for lbl, val in zip(labels, sizes)]
         self.axes.legend(
             wedges, 
@@ -676,28 +365,9 @@ class DonutChartCanvas(FigureCanvas):
             labelspacing=0.5
         )
 
-        # 5. Reserve plot margins so the legend is never cut off
         self.figure.subplots_adjust(left=0.05, right=0.58, top=0.92, bottom=0.08)
         self.draw()
 
-
-def load_absolute_app_icon():
-    """Locates and returns the application icon using strict absolute path resolution."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Check for native .ico first, then .png fallbacks
-    candidates = [
-        os.path.join(base_dir, "assets", "logo.ico"),
-        os.path.join(base_dir, "assets", "logo.png"),
-        os.path.join(base_dir, "logo.ico"),
-        os.path.join(base_dir, "logo.png"),
-    ]
-    
-    for path in candidates:
-        if os.path.exists(path):
-            return QIcon(path)
-            
-    return QIcon()
 
 # ==========================================
 # MAIN WINDOW
@@ -710,7 +380,6 @@ class MainWindow(QMainWindow):
 
         self.is_admin = str(self.user_role).strip().lower() in ['admin', 'administrator']
 
-        # Cache variables for overall inventory totals
         self.cached_total_qty = 0
         self.cached_total_unit_price = 0.0
         self.cached_total_price = 0.0
@@ -719,7 +388,6 @@ class MainWindow(QMainWindow):
         self.setGeometry(50, 50, 1400, 850)
         self.setStyleSheet("QMainWindow { background-color: #FBFBFA; }")
         
-        # Set window icon directly using absolute resolution
         app_icon = load_absolute_app_icon()
         if not app_icon.isNull():
             self.setWindowIcon(app_icon)
@@ -732,8 +400,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Executes when the main window is closed to cleanly terminate all processes."""
         import matplotlib.pyplot as plt
-        from PyQt5.QtWidgets import QApplication
-
         plt.close('all')
         event.accept()
         QApplication.quit()
@@ -768,7 +434,8 @@ class MainWindow(QMainWindow):
             self.switch_tab(2, getattr(self, 'btn_hist', None))
 
     def _ensure_database_schema(self):
-        """ ensure required fields exist in the Inventory and AuditLogs tables """
+        """Ensure required fields exist in the Inventory and AuditLogs tables."""
+        conn = None
         try:
             conn = connect_db()
             cursor = conn.cursor()
@@ -818,9 +485,11 @@ class MainWindow(QMainWindow):
                 """)
 
             conn.commit()
-            conn.close()
         except Exception as e:
             print(f"Schema verification warning: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -955,17 +624,16 @@ class MainWindow(QMainWindow):
         delete_action.setShortcut(QKeySequence("Delete"))
         delete_action.triggered.connect(self.delete_inventory_item)
         
-        current_role_clean = str(self.user_role).strip().lower() if self.user_role else ""
-        if current_role_clean != "admin":
+        if not self.is_admin:
             delete_action.setEnabled(False)
             
         edit_menu.addAction(delete_action)
 
         edit_menu.addSeparator()
 
-        users_action = QAction("👤 User Management", self)
-        users_action.triggered.connect(self.open_users)
-        edit_menu.addAction(users_action)
+        self.users_action = QAction("👤 User Management", self)
+        self.users_action.triggered.connect(self.open_users)
+        edit_menu.addAction(self.users_action)
 
         view_menu = menu_bar.addMenu("View")
 
@@ -1024,6 +692,7 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
+        conn = None
         try:
             with open(file_path, mode='r', encoding='utf-8-sig') as file:
                 reader = csv.DictReader(file)
@@ -1099,7 +768,6 @@ class MainWindow(QMainWindow):
                 """
                 cursor.executemany(insert_query, rows_to_insert)
                 conn.commit()
-                conn.close()
 
                 try:
                     log_audit(
@@ -1115,13 +783,17 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Import Failed", f"An error occurred while reading the CSV:\n{e}")
+        finally:
+            if conn:
+                conn.close()
 
     def export_to_csv(self):
-        """ Opens custom export options dialog """
+        """Opens custom export options dialog."""
         dialog = ExportDialog(username=self.username, parent=self)
         dialog.exec_()
 
     def print_inventory_report(self):
+        conn = None
         try:
             printer = QPrinter(QPrinter.HighResolution)
             dialog = QPrintDialog(printer, self)
@@ -1130,7 +802,6 @@ class MainWindow(QMainWindow):
                 cursor = conn.cursor()
                 cursor.execute("SELECT Id, DeviceName, DeviceType, Quantity, Receiver, ReceiveDate FROM Inventory")
                 rows = cursor.fetchall()
-                conn.close()
 
                 html = "<h2>IT Warehouse - Inventory Report</h2>"
                 html += f"<p><b>Generated by:</b> {self.username} | <b>Date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>"
@@ -1147,6 +818,9 @@ class MainWindow(QMainWindow):
                 log_audit(self.username, "PRINT_REPORT", "Printed inventory summary report")
         except Exception as e:
             QMessageBox.critical(self, "Print Error", f"Failed to send job to printer:\n{e}")
+        finally:
+            if conn:
+                conn.close()
 
     def _build_sidebar(self):
         sidebar = QFrame()
@@ -1434,8 +1108,7 @@ class MainWindow(QMainWindow):
         self.btn_delete_inventory.setStyleSheet("background-color: #EF4444; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
         self.btn_delete_inventory.clicked.connect(self.delete_inventory_item)
         
-        current_role_clean = str(self.user_role).strip().lower() if self.user_role else ""
-        if current_role_clean != "admin":
+        if not self.is_admin:
             self.btn_delete_inventory.hide()
             
         header_layout.addWidget(self.btn_delete_inventory)
@@ -1504,6 +1177,7 @@ class MainWindow(QMainWindow):
             return
         item_id = item_id_item.text().replace("#", "").strip()
 
+        conn = None
         try:
             self._ensure_database_schema()
             conn = connect_db()
@@ -1512,7 +1186,6 @@ class MainWindow(QMainWindow):
             cursor.execute("SELECT * FROM Inventory WHERE Id = ?", (item_id,))
             row_data = cursor.fetchone()
             columns = [col[0] for col in cursor.description] if cursor.description else []
-            conn.close()
 
             if not row_data:
                 QMessageBox.warning(self, "Error", "Selected inventory item could not be found in the database.")
@@ -1552,6 +1225,9 @@ class MainWindow(QMainWindow):
             dialog.exec_()
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to fetch item details from database:\n{e}")
+        finally:
+            if conn:
+                conn.close()
 
     def delete_inventory_item(self):
         selected_row = self.inventory_table.currentRow()
@@ -1574,18 +1250,21 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
+            conn = None
             try:
                 conn = connect_db()
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM Inventory WHERE Id = ?", (item_id,))
                 conn.commit()
-                conn.close()
 
                 log_audit(self.username, "INVENTORY_DELETE", f"Deleted inventory item #{item_id}")
                 QMessageBox.information(self, "Success", f"Inventory item #{item_id} deleted successfully.")
                 self.refresh_all_data()
             except Exception as e:
                 QMessageBox.critical(self, "Database Error", f"Failed to delete item:\n{e}")
+            finally:
+                if conn:
+                    conn.close()
 
     def _build_history_tab(self):
         container = QWidget()
@@ -1616,8 +1295,7 @@ class MainWindow(QMainWindow):
         self.btn_delete_history.setStyleSheet("background-color: #EF4444; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
         self.btn_delete_history.clicked.connect(self.delete_history_record)
         
-        current_role_clean = str(self.user_role).strip().lower() if self.user_role else ""
-        if current_role_clean != "admin":
+        if not self.is_admin:
             self.btn_delete_history.hide()
             
         header_layout.addWidget(self.btn_delete_history)
@@ -1651,6 +1329,7 @@ class MainWindow(QMainWindow):
             return
         log_id = log_id_item.text().replace("#", "").strip()
 
+        conn = None
         try:
             self._ensure_database_schema()
             conn = connect_db()
@@ -1662,7 +1341,6 @@ class MainWindow(QMainWindow):
 
             row_data = cursor.fetchone()
             columns = [col[0] for col in cursor.description] if cursor.description else []
-            conn.close()
 
             if not row_data:
                 QMessageBox.warning(self, "Error", "Selected audit log record could not be found in the database.")
@@ -1697,6 +1375,9 @@ class MainWindow(QMainWindow):
             dialog.exec_()
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to fetch history details from database:\n{e}")
+        finally:
+            if conn:
+                conn.close()
 
     def delete_history_record(self):
         selected_row = self.history_table.currentRow()
@@ -1719,6 +1400,7 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
+            conn = None
             try:
                 conn = connect_db()
                 cursor = conn.cursor()
@@ -1728,12 +1410,13 @@ class MainWindow(QMainWindow):
                     cursor.execute("DELETE FROM AuditLogs WHERE LogId = ?", (log_id,))
 
                 conn.commit()
-                conn.close()
-
                 QMessageBox.information(self, "Success", f"Log record #{log_id} deleted successfully.")
                 self.refresh_all_data()
             except Exception as e:
                 QMessageBox.critical(self, "Database Error", f"Failed to delete record:\n{e}")
+            finally:
+                if conn:
+                    conn.close()
 
     def _create_kpi_card(self, title, val, sub):
         frame = QFrame()
@@ -1901,19 +1584,29 @@ class MainWindow(QMainWindow):
                     val_str = self.format_value_clean(val)
                     self.inventory_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
 
-            # 5. Populate History & Audit Table
+            # 5. Populate Audit Logs Table
             cursor.execute("SELECT * FROM AuditLogs ORDER BY 1 DESC")
             hist_rows = cursor.fetchall()
-            hist_cols = [col[0] for col in cursor.description] if cursor.description else []
-            self.history_table.setColumnCount(len(hist_cols))
-            self.history_table.setHorizontalHeaderLabels([self._format_key_name_helper(c) for c in hist_cols])
+            audit_db_cols = [col[0].lower().replace("_", "").replace(" ", "") for col in cursor.description] if cursor.description else []
+
+            headers = ["Log Id", "Username", "Action Type", "Details"]
+            self.history_table.setColumnCount(len(headers))
+            self.history_table.setHorizontalHeaderLabels(headers)
             self.history_table.setRowCount(len(hist_rows))
+
+            id_idx = audit_db_cols.index("id") if "id" in audit_db_cols else (audit_db_cols.index("logid") if "logid" in audit_db_cols else 0)
+            user_idx = audit_db_cols.index("username") if "username" in audit_db_cols else 1
+            action_idx = audit_db_cols.index("action") if "action" in audit_db_cols else (audit_db_cols.index("actiontype") if "actiontype" in audit_db_cols else 2)
+            details_idx = audit_db_cols.index("details") if "details" in audit_db_cols else 3
+
+            col_map = [id_idx, user_idx, action_idx, details_idx]
+
             for r_idx, r_data in enumerate(hist_rows):
-                for c_idx, val in enumerate(r_data):
+                for c_idx, db_idx in enumerate(col_map):
+                    val = r_data[db_idx] if db_idx < len(r_data) else ""
                     val_str = f"#{val}" if c_idx == 0 else self.format_value_clean(val)
                     self.history_table.setItem(r_idx, c_idx, QTableWidgetItem(val_str))
 
-            # Recalculate and cache totals upon complete table reload
             self._recalculate_cached_totals()
             self.update_inventory_totals()
 
@@ -1950,129 +1643,6 @@ class MainWindow(QMainWindow):
         clean = re.sub(r'([a-z])([A-Z])', r'\1 \2', clean)
         return clean.title()
 
-    def load_dashboard_data(self):
-        try:
-            current_day = datetime.now().strftime("%A").upper()
-            self.title_sup.setText(f"{current_day} / WAREHOUSE CONTROL")
-
-            conn = connect_db()
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT ISNULL(SUM(Quantity), 0) FROM Inventory")
-            self.kpi_units.findChildren(QLabel)[1].setText(str(cursor.fetchone()[0]))
-
-            cursor.execute("SELECT COUNT(DISTINCT DeviceName) FROM Inventory")
-            self.kpi_lines.findChildren(QLabel)[1].setText(str(cursor.fetchone()[0]))
-
-            cursor.execute("SELECT COUNT(*) FROM AuditLogs")
-            self.kpi_trans.findChildren(QLabel)[1].setText(str(cursor.fetchone()[0]))
-
-            cursor.execute("SELECT COUNT(*) FROM Inventory WHERE Quantity <= 3")
-            self.kpi_low.findChildren(QLabel)[1].setText(str(cursor.fetchone()[0]))
-
-            cursor.execute("SELECT TOP 5 DeviceName, SUM(Quantity) FROM Inventory GROUP BY DeviceName ORDER BY SUM(Quantity) DESC")
-            data_names = {row[0]: row[1] for row in cursor.fetchall()}
-            self.chart_names.update_chart(data_names)
-
-            cursor.execute("SELECT ISNULL(DeviceType, 'Uncategorized'), SUM(Quantity) FROM Inventory GROUP BY DeviceType")
-            data_types = {row[0]: row[1] for row in cursor.fetchall()}
-            self.chart_types.update_chart(data_types)
-
-            cursor.execute("SELECT TOP 10 Id, DeviceName, DeviceType, Quantity, Receiver, ReceiveDate FROM Inventory ORDER BY Id DESC")
-            rows = cursor.fetchall()
-            self.dash_table.setRowCount(0)
-            for row_idx, row_data in enumerate(rows):
-                self.dash_table.insertRow(row_idx)
-                for col_idx, value in enumerate(row_data):
-                    if col_idx == 0:
-                        val_str = f"#{value}"
-                    elif col_idx == 5:
-                        val_str = self.format_value_clean(value)
-                    else:
-                        val_str = str(value) if value is not None else ""
-                    
-                    item = QTableWidgetItem(val_str)
-                    if col_idx in [0, 3]:
-                        item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-                    else:
-                        item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    self.dash_table.setItem(row_idx, col_idx, item)
-
-            conn.close()
-        except Exception as e:
-            QMessageBox.critical(self, "Database Fetch Error", str(e))
-
-    def load_inventory_data(self):
-        try:
-            conn = connect_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM Inventory")
-            
-            raw_columns = [col[0] for col in cursor.description] if cursor.description else []
-            
-            display_columns = [c for c in raw_columns if c.lower() != 'note']
-            note_cols = [c for c in raw_columns if c.lower() == 'note']
-            display_columns.extend(note_cols)
-
-            col_indices = [raw_columns.index(c) for c in display_columns]
-
-            self.inventory_table.setColumnCount(len(display_columns))
-            self.inventory_table.setHorizontalHeaderLabels([col.upper() for col in display_columns])
-            
-            rows = cursor.fetchall()
-            self.inventory_table.setRowCount(0)
-            for row_idx, row_data in enumerate(rows):
-                self.inventory_table.insertRow(row_idx)
-                for new_col_idx, orig_col_idx in enumerate(col_indices):
-                    value = row_data[orig_col_idx]
-                    val_str = self.format_value_clean(value)
-                    item = QTableWidgetItem(val_str)
-                    if new_col_idx == 0:
-                        item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-                    else:
-                        item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    self.inventory_table.setItem(row_idx, new_col_idx, item)
-            conn.close()
-            
-            self._recalculate_cached_totals()
-            self.update_inventory_totals()
-        except Exception as e:
-            QMessageBox.critical(self, "Database Fetch Error", str(e))
-
-    def load_history_data(self):
-        try:
-            conn = connect_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM AuditLogs")
-            
-            raw_columns = [col[0] for col in cursor.description] if cursor.description else []
-            
-            display_columns = [c for c in raw_columns if c.lower() not in ('note', 'details')]
-            trailing_cols = [c for c in raw_columns if c.lower() in ('details', 'note')]
-            display_columns.extend(trailing_cols)
-
-            col_indices = [raw_columns.index(c) for c in display_columns]
-
-            self.history_table.setColumnCount(len(display_columns))
-            self.history_table.setHorizontalHeaderLabels([col.upper() for col in display_columns])
-            
-            rows = cursor.fetchall()
-            self.history_table.setRowCount(0)
-            for row_idx, row_data in enumerate(rows):
-                self.history_table.insertRow(row_idx)
-                for new_col_idx, orig_col_idx in enumerate(col_indices):
-                    value = row_data[orig_col_idx]
-                    val_str = self.format_value_clean(value)
-                    item = QTableWidgetItem(val_str)
-                    if new_col_idx == 0:
-                        item.setTextAlignment(Qt.AlignCenter | Qt.AlignVCenter)
-                    else:
-                        item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    self.history_table.setItem(row_idx, new_col_idx, item)
-            conn.close()
-        except Exception as e:
-            QMessageBox.critical(self, "Database Fetch Error", str(e))
-
     def open_stock_in(self):
         """Opens Stock In dialog and refreshes all dashboard views on completion."""
         dialog = StockInDialog(username=self.username, parent=self)
@@ -2095,10 +1665,7 @@ class MainWindow(QMainWindow):
         dialog.exec_()
 
     def logout(self):
-        """Logs out the current user and returns to the login dialog."""
-        from PyQt5.QtWidgets import QMessageBox, QDialog
-        from auth import LoginDialog
-
+        """Logs out the current user and prompts for new credentials without quitting."""
         confirm = QMessageBox.question(
             self,
             "Logout Confirmation",
@@ -2112,10 +1679,10 @@ class MainWindow(QMainWindow):
 
         self.hide()
 
-        login = LoginDialog()
-        if login.exec_() == QDialog.Accepted:
-            self.username = login.username
-            self.user_role = login.user_role
+        login_dialog = LoginDialog()
+        if login_dialog.exec_() == QDialog.Accepted:
+            self.username = login_dialog.username
+            self.user_role = login_dialog.user_role
             self.is_admin = str(self.user_role).strip().lower() in ['admin', 'administrator']
 
             if hasattr(self, 'user_info_label'):
@@ -2129,8 +1696,8 @@ class MainWindow(QMainWindow):
 
     def focus_search_bar(self):
         """Switches to inventory view if needed and focuses the search field."""
-        if hasattr(self, 'tabs'):
-            self.tabs.setCurrentIndex(1)
+        if hasattr(self, 'stacked_widget'):
+            self.switch_tab(1, self.btn_inv)
             
         self.search_input.setFocus()
         self.search_input.selectAll()
@@ -2167,7 +1734,7 @@ class MainWindow(QMainWindow):
         self.update_inventory_totals()
 
     def update_inventory_totals(self):
-        """Uses cached totals for unfiltered inventory, recalculates dynamically when search filter active."""
+        """Uses cached totals for unfiltered inventory, recalculates dynamically when search filter is active."""
         query = self.search_input.text().strip() if hasattr(self, 'search_input') else ""
 
         if not query:
@@ -2235,26 +1802,20 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    
-    # Force application termination when all windows are closed
     app.setQuitOnLastWindowClosed(True)
     
-    # 1. Load absolute icon
     app_icon = load_absolute_app_icon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
-    # 2. Check & Initialize Database
     try:
         init_db()
     except Exception as e:
         QMessageBox.critical(None, "Startup Error", f"Failed to connect to database:\n{e}")
         sys.exit(1)
 
-    # 3. Launch Login Dialog
     login = LoginDialog()
     if login.exec_() == QDialog.Accepted:
-        # Re-apply icon to process after login dialog finishes
         if not app_icon.isNull():
             app.setWindowIcon(app_icon)
             
