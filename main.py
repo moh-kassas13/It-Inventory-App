@@ -6,7 +6,7 @@ import re
 import time
 from datetime import datetime, date
 
-import pyodbc
+import sqlite3
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QPushButton, QLabel,
@@ -35,21 +35,14 @@ if sys.platform == 'win32':
 
 def connect_with_retry(max_retries=5, delay=3):
     """
-    Attempts to connect to SQL Server. 
-    Retries up to 5 times with a 3-second delay to allow the background service to start.
+    Attempts to connect to the SQLite database with lock retry delays.
     """
-    conn_str = (
-        "DRIVER={ODBC Driver 17 for SQL Server};"
-        "SERVER=.\\SQLEXPRESS;"
-        "DATABASE=master;"  # or WarehouseDB
-        "Trusted_Connection=yes;"
-    )
-    
+    db_path = get_resource_path("warehouse.db")
     for attempt in range(1, max_retries + 1):
         try:
-            connection = pyodbc.connect(conn_str, timeout=5)
+            connection = sqlite3.connect(db_path, timeout=10)
             return connection
-        except pyodbc.Error as e:
+        except sqlite3.Error as e:
             if attempt < max_retries:
                 time.sleep(delay)
             else:
@@ -57,8 +50,13 @@ def connect_with_retry(max_retries=5, delay=3):
 
 
 def load_absolute_app_icon():
-    """Locates and returns the application icon using strict absolute path resolution."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    """Locates and returns the application icon using PyInstaller bundle path resolution."""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller extracts bundled files to sys._MEIPASS at runtime
+        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
     candidates = [
         os.path.join(base_dir, "assets", "logo.ico"),
         os.path.join(base_dir, "assets", "logo.png"),
@@ -160,15 +158,12 @@ class UserManagementDialog(QDialog):
             cursor = conn.cursor()
 
             cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Users')
-                BEGIN
-                    CREATE TABLE Users (
-                        Id INT IDENTITY(1,1) PRIMARY KEY,
-                        Username NVARCHAR(50) NOT NULL UNIQUE,
-                        Password NVARCHAR(255) NOT NULL,
-                        Role NVARCHAR(50) NOT NULL
-                    )
-                END
+                CREATE TABLE IF NOT EXISTS Users (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    Username TEXT NOT NULL UNIQUE,
+                    Password TEXT NOT NULL,
+                    Role TEXT NOT NULL
+                )
             """)
             conn.commit()
 
@@ -405,7 +400,7 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     def apply_user_permissions(self):
-        """Restricts UI access for non-admin accounts."""
+        """Restricts UI access and functionality for non-admin accounts."""
         if hasattr(self, 'tab_widget'):
             for i in range(self.tab_widget.count()):
                 tab_name = self.tab_widget.tabText(i).strip().lower()
@@ -424,6 +419,16 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'users_action'):
             self.users_action.setVisible(self.is_admin)
 
+        # Restrict Import / Export actions and buttons to Admins only
+        if hasattr(self, 'btn_import_csv'):
+            self.btn_import_csv.setVisible(self.is_admin)
+        if hasattr(self, 'btn_export_csv'):
+            self.btn_export_csv.setVisible(self.is_admin)
+        if hasattr(self, 'import_action'):
+            self.import_action.setVisible(self.is_admin)
+        if hasattr(self, 'export_action'):
+            self.export_action.setVisible(self.is_admin)
+
     def open_history(self):
         """Action handler to switch to or display History, guarded with an admin check."""
         if not self.is_admin:
@@ -440,49 +445,21 @@ class MainWindow(QMainWindow):
             conn = connect_db()
             cursor = conn.cursor()
             
-            inventory_cols = [
-                ("Sender", "NVARCHAR(255)"),
-                ("WarrantyDate", "NVARCHAR(100)"),
-                ("TicketNumber", "NVARCHAR(100)"),
-                ("FromWhere", "NVARCHAR(255)")
-            ]
-            for col_name, col_type in inventory_cols:
-                cursor.execute(f"""
-                    IF NOT EXISTS (
-                        SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_NAME = 'Inventory' AND COLUMN_NAME = '{col_name}'
-                    )
-                    BEGIN
-                        ALTER TABLE Inventory ADD {col_name} {col_type} NULL
-                    END
-                """)
+            cursor.execute("PRAGMA table_info(Inventory)")
+            inv_cols = [row[1] for row in cursor.fetchall()]
+            inventory_required = ["Sender", "WarrantyDate", "TicketNumber", "FromWhere"]
+            
+            for col in inventory_required:
+                if col not in inv_cols:
+                    cursor.execute(f"ALTER TABLE Inventory ADD COLUMN {col} TEXT")
 
-            cursor.execute("""
-                IF EXISTS (
-                    SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
-                    WHERE TABLE_NAME = 'Inventory' AND COLUMN_NAME = 'ReceiveDate' AND DATA_TYPE = 'date'
-                )
-                BEGIN
-                    ALTER TABLE Inventory ALTER COLUMN ReceiveDate NVARCHAR(100) NULL
-                END
-            """)
-
-            audit_cols = [
-                ("Sender", "NVARCHAR(255)"),
-                ("WarrantyDate", "NVARCHAR(100)"),
-                ("TicketNumber", "NVARCHAR(100)"),
-                ("FromWhere", "NVARCHAR(255)")
-            ]
-            for col_name, col_type in audit_cols:
-                cursor.execute(f"""
-                    IF NOT EXISTS (
-                        SELECT * FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_NAME = 'AuditLogs' AND COLUMN_NAME = '{col_name}'
-                    )
-                    BEGIN
-                        ALTER TABLE AuditLogs ADD {col_name} {col_type} NULL
-                    END
-                """)
+            cursor.execute("PRAGMA table_info(AuditLogs)")
+            audit_cols = [row[1] for row in cursor.fetchall()]
+            audit_required = ["Sender", "WarrantyDate", "TicketNumber", "FromWhere"]
+            
+            for col in audit_required:
+                if col not in audit_cols:
+                    cursor.execute(f"ALTER TABLE AuditLogs ADD COLUMN {col} TEXT")
 
             conn.commit()
         except Exception as e:
@@ -585,14 +562,14 @@ class MainWindow(QMainWindow):
         
         file_menu = menu_bar.addMenu("File")
         
-        import_action = QAction("📥 Import Inventory (CSV)", self)
-        import_action.triggered.connect(self.import_csv)
-        file_menu.addAction(import_action)
+        self.import_action = QAction("📥 Import Inventory (CSV)", self)
+        self.import_action.triggered.connect(self.import_csv)
+        file_menu.addAction(self.import_action)
 
-        export_action = QAction("📤 Export Inventory (CSV)", self)
-        export_action.setShortcut(QKeySequence("Ctrl+E"))
-        export_action.triggered.connect(self.export_to_csv)
-        file_menu.addAction(export_action)
+        self.export_action = QAction("📤 Export Inventory (CSV)", self)
+        self.export_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.export_action.triggered.connect(self.export_to_csv)
+        file_menu.addAction(self.export_action)
 
         print_action = QAction("🖨 Print / PDF Report", self)
         print_action.setShortcut(QKeySequence("Ctrl+P"))
@@ -680,6 +657,10 @@ class MainWindow(QMainWindow):
         return header_frame
 
     def import_csv(self):
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators are allowed to import CSV files.")
+            return
+
         expected_headers = [
             "DeviceName", "DeviceType", "Quantity", "Sender", "Receiver",
             "ReceiveDate", "WarrantyDate", "Barcode", "TicketNumber",
@@ -788,7 +769,11 @@ class MainWindow(QMainWindow):
                 conn.close()
 
     def export_to_csv(self):
-        """Opens custom export options dialog."""
+        """Opens custom export options dialog for Admins only."""
+        if not self.is_admin:
+            QMessageBox.warning(self, "Access Denied", "Only administrators are allowed to export CSV files.")
+            return
+
         dialog = ExportDialog(username=self.username, parent=self)
         dialog.exec_()
 
@@ -864,7 +849,7 @@ class MainWindow(QMainWindow):
         line.setStyleSheet("border-top: 1px solid #E4E4E7; margin: 0px 15px;")
         layout.addWidget(line)
         
-        lbl_storage = QLabel(" LOCAL STORAGE\n Automatic persistence is active.\n Data stored in SQL server.")
+        lbl_storage = QLabel(" LOCAL STORAGE\n Automatic persistence is active.\n Data stored in SQLite database.")
         lbl_storage.setStyleSheet("font-size: 10px; color: #71717A; border: none; padding-left: 15px; padding-top: 5px;")
         layout.addWidget(lbl_storage)
         
@@ -903,7 +888,9 @@ class MainWindow(QMainWindow):
         title_row = QHBoxLayout()
         title_texts = QVBoxLayout()
         
-        self.title_sup = QLabel()
+        # Upper header dynamic text
+        current_day = datetime.now().strftime("%A").upper()
+        self.title_sup = QLabel(f"{current_day} / WAREHOUSE CONTROL")
         self.title_sup.setStyleSheet("color: #C2410C; font-size: 10px; font-weight: 800; letter-spacing: 1px;")
         
         title_main = QLabel("Operations desk")
@@ -1494,14 +1481,19 @@ class MainWindow(QMainWindow):
         self.cached_total_price = total_price
 
     def refresh_all_data(self):
-        """Refreshes KPI statistics, charts, table views, and caches overall totals."""
+        """Refreshes KPI statistics, charts, table views, dynamic headers, and caches overall totals."""
         conn = None
         try:
+            # Refresh dynamic day header
+            if hasattr(self, 'title_sup'):
+                current_day = datetime.now().strftime("%A").upper()
+                self.title_sup.setText(f"{current_day} / WAREHOUSE CONTROL")
+
             conn = connect_db()
             cursor = conn.cursor()
 
             # 1. Update KPI Cards
-            cursor.execute("SELECT ISNULL(SUM(Quantity), 0), COUNT(*) FROM Inventory")
+            cursor.execute("SELECT COALESCE(SUM(Quantity), 0), COUNT(*) FROM Inventory")
             total_units, total_lines = cursor.fetchone()
 
             cursor.execute("SELECT COUNT(*) FROM AuditLogs")
@@ -1525,7 +1517,7 @@ class MainWindow(QMainWindow):
             self.chart_types.update_chart(type_data)
 
             # 3. Populate Dashboard Recent Inventory Table
-            cursor.execute("SELECT TOP 10 * FROM Inventory ORDER BY 1 DESC")
+            cursor.execute("SELECT * FROM Inventory ORDER BY 1 DESC LIMIT 10")
             dash_rows = cursor.fetchall()
             dash_cols = [col[0] for col in cursor.description] if cursor.description else []
             self.dash_table.setColumnCount(len(dash_cols))
@@ -1611,7 +1603,7 @@ class MainWindow(QMainWindow):
             self.update_inventory_totals()
 
         except Exception as e:
-            QMessageBox.critical(self, "Data Refresh Error", f"Failed to refresh data from SQL database:\n{e}")
+            QMessageBox.critical(self, "Data Refresh Error", f"Failed to refresh data from SQLite database:\n{e}")
         finally:
             if conn:
                 conn.close()
