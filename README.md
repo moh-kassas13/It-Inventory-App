@@ -29,7 +29,10 @@ WarehouseApp/
 ├── assets/
 │   ├── logo.ico
 │   └── logo.png
-├── auth.py              # Authentication & helper modules
-├── main.py              # Main application entry point
+├── auth.py             
+├── database.py
+├── dialogs.py
+├── report_feature.py
+├── main.py              
 ├── setup.iss            # Inno Setup installer script
 └── README.md            # Repository documentation
