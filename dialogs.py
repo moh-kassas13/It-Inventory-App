@@ -237,19 +237,57 @@ class ExportDialog(QDialog):
 # STOCK IN DIALOG
 # ==========================================
 class StockInDialog(QDialog):
-    def __init__(self, username="System", is_admin=False, parent=None):
+    def __init__(self, username="System", is_admin=False, parent=None, item_data=None):
         if isinstance(username, QWidget):
             parent = username
             username = getattr(parent, 'username', 'System')
             is_admin = getattr(parent, 'is_admin', False)
+        elif isinstance(username, dict):
+            item_data = username
+            username = "System"
         
         super().__init__(parent)
         self.username = username
         self.is_admin = is_admin or self._check_admin_status()
+        self.item_data = item_data or {}
+        self.item_id = self._extract_id(self.item_data)
+
         self.setWindowTitle("Stock In - Inbound Transaction")
         self.resize(560, 780)
         self.setStyleSheet("QDialog { background-color: #FFFFFF; }")
+        
         self._init_ui()
+
+        if self.item_data:
+            self._prefill_existing_data()
+
+    def set_item_data(self, item_data):
+        """Explicitly set item data, extract ID, and lock fields."""
+        if not item_data:
+            return
+        self.item_data = item_data
+        self.item_id = self._extract_id(item_data)
+        self._prefill_existing_data()
+
+    def _extract_id(self, data):
+        """Find the ID field across common dictionary key conventions."""
+        if not data or not isinstance(data, dict):
+            return None
+        for key in ["ID", "id", "Id", "Item_ID", "itemID", "item_id"]:
+            if key in data and data[key] not in (None, "", "-"):
+                return data[key]
+        return None
+
+    def _extract_field(self, *keys):
+        """Safely extract string values from item_data dict."""
+        if not self.item_data:
+            return ""
+        for key in keys:
+            if key in self.item_data and self.item_data[key] is not None:
+                val = str(self.item_data[key]).strip()
+                if val and val != "-":
+                    return val
+        return ""
 
     def _check_admin_status(self):
         if self.username == "System":
@@ -310,24 +348,24 @@ class StockInDialog(QDialog):
         self.cbo_dev_name = QComboBox()
         self._style_input(self.cbo_dev_name)
 
-        btn_add_dev_name = QPushButton("+")
-        btn_add_dev_name.setFixedWidth(30)
-        btn_add_dev_name.setToolTip("Add new Device Name")
-        btn_add_dev_name.setStyleSheet(btn_add_style)
-        btn_add_dev_name.setVisible(self.is_admin)
-        btn_add_dev_name.clicked.connect(self._add_new_device_name)
+        self.btn_add_dev_name = QPushButton("+")
+        self.btn_add_dev_name.setFixedWidth(30)
+        self.btn_add_dev_name.setToolTip("Add new Device Name")
+        self.btn_add_dev_name.setStyleSheet(btn_add_style)
+        self.btn_add_dev_name.setVisible(self.is_admin)
+        self.btn_add_dev_name.clicked.connect(self._add_new_device_name)
 
-        btn_del_dev_name = QPushButton("-")
-        btn_del_dev_name.setFixedWidth(30)
-        btn_del_dev_name.setToolTip("Remove selected Device Name from options")
-        btn_del_dev_name.setStyleSheet(btn_del_style)
-        btn_del_dev_name.setVisible(self.is_admin)
-        btn_del_dev_name.clicked.connect(self._delete_device_name)
+        self.btn_del_dev_name = QPushButton("-")
+        self.btn_del_dev_name.setFixedWidth(30)
+        self.btn_del_dev_name.setToolTip("Remove selected Device Name from options")
+        self.btn_del_dev_name.setStyleSheet(btn_del_style)
+        self.btn_del_dev_name.setVisible(self.is_admin)
+        self.btn_del_dev_name.clicked.connect(self._delete_device_name)
 
         dev_name_layout.addWidget(self.cbo_dev_name, stretch=1)
         if self.is_admin:
-            dev_name_layout.addWidget(btn_add_dev_name)
-            dev_name_layout.addWidget(btn_del_dev_name)
+            dev_name_layout.addWidget(self.btn_add_dev_name)
+            dev_name_layout.addWidget(self.btn_del_dev_name)
 
         self._populate_device_names()
 
@@ -338,24 +376,24 @@ class StockInDialog(QDialog):
         self.cbo_dev_type = QComboBox()
         self._style_input(self.cbo_dev_type)
 
-        btn_add_dev_type = QPushButton("+")
-        btn_add_dev_type.setFixedWidth(30)
-        btn_add_dev_type.setToolTip("Add new Device Type")
-        btn_add_dev_type.setStyleSheet(btn_add_style)
-        btn_add_dev_type.setVisible(self.is_admin)
-        btn_add_dev_type.clicked.connect(self._add_new_device_type)
+        self.btn_add_dev_type = QPushButton("+")
+        self.btn_add_dev_type.setFixedWidth(30)
+        self.btn_add_dev_type.setToolTip("Add new Device Type")
+        self.btn_add_dev_type.setStyleSheet(btn_add_style)
+        self.btn_add_dev_type.setVisible(self.is_admin)
+        self.btn_add_dev_type.clicked.connect(self._add_new_device_type)
 
-        btn_del_dev_type = QPushButton("-")
-        btn_del_dev_type.setFixedWidth(30)
-        btn_del_dev_type.setToolTip("Remove selected Device Type from options")
-        btn_del_dev_type.setStyleSheet(btn_del_style)
-        btn_del_dev_type.setVisible(self.is_admin)
-        btn_del_dev_type.clicked.connect(self._delete_device_type)
+        self.btn_del_dev_type = QPushButton("-")
+        self.btn_del_dev_type.setFixedWidth(30)
+        self.btn_del_dev_type.setToolTip("Remove selected Device Type from options")
+        self.btn_del_dev_type.setStyleSheet(btn_del_style)
+        self.btn_del_dev_type.setVisible(self.is_admin)
+        self.btn_del_dev_type.clicked.connect(self._delete_device_type)
 
         dev_type_layout.addWidget(self.cbo_dev_type, stretch=1)
         if self.is_admin:
-            dev_type_layout.addWidget(btn_add_dev_type)
-            dev_type_layout.addWidget(btn_del_dev_type)
+            dev_type_layout.addWidget(self.btn_add_dev_type)
+            dev_type_layout.addWidget(self.btn_del_dev_type)
 
         self._populate_device_types()
 
@@ -420,7 +458,7 @@ class StockInDialog(QDialog):
         self._style_input(self.spn_unit_price)
         self.spn_unit_price.valueChanged.connect(self._recalculate_from_unit)
 
-        # 14. Total Price (Bidirectional & Editable)
+        # 14. Total Price
         self.spn_total_price = QDoubleSpinBox()
         self.spn_total_price.setRange(0.00, 99999999.99)
         self.spn_total_price.setDecimals(2)
@@ -437,7 +475,7 @@ class StockInDialog(QDialog):
         # Form Layout Setup
         form_layout.addRow(self._make_label("Device Name *"), dev_name_layout)
         form_layout.addRow(self._make_label("Device Type *"), dev_type_layout)
-        form_layout.addRow(self._make_label("Quantity *"), self.spn_quantity)
+        form_layout.addRow(self._make_label("Quantity to Add *"), self.spn_quantity)
         form_layout.addRow(self._make_label("Sender *"), self.txt_sender)
         form_layout.addRow(self._make_label("Receiver *"), self.txt_receiver)
         form_layout.addRow(self._make_label("Date & Time Receiving *"), self.dt_receive_datetime)
@@ -470,6 +508,55 @@ class StockInDialog(QDialog):
         btn_layout.addWidget(btn_save)
         main_layout.addLayout(btn_layout)
 
+    def _prefill_existing_data(self):
+        """Populate form fields with existing item data and lock identity fields."""
+        dev_name = self._extract_field("DeviceName", "Device Name", "device_name")
+        dev_type = self._extract_field("DeviceType", "Device Type", "device_type")
+        barcode = self._extract_field("Barcode", "Barcode Number", "barcode")
+        serial = self._extract_field("SerialNumber", "Serial Number", "serial_number")
+        ticket = self._extract_field("TicketNumber", "Ticket Number", "ticket_number")
+        from_wh = self._extract_field("FromWhere", "From Where", "from_where")
+        host = self._extract_field("HostName", "Host Name", "hostname")
+        sender = self._extract_field("Sender", "sender")
+        receiver = self._extract_field("Receiver", "receiver")
+        
+        try:
+            unit_price = float(self._extract_field("UnitPrice", "Unit Price", "unit_price") or 0.0)
+            self.spn_unit_price.setValue(unit_price)
+        except ValueError:
+            pass
+
+        idx_name = self.cbo_dev_name.findText(dev_name)
+        if idx_name >= 0:
+            self.cbo_dev_name.setCurrentIndex(idx_name)
+        else:
+            self.cbo_dev_name.setCurrentText(dev_name)
+
+        idx_type = self.cbo_dev_type.findText(dev_type)
+        if idx_type >= 0:
+            self.cbo_dev_type.setCurrentIndex(idx_type)
+        else:
+            self.cbo_dev_type.setCurrentText(dev_type)
+
+        self.txt_barcode.setText(barcode)
+        self.txt_serial_num.setText(serial)
+        self.txt_ticket_num.setText(ticket)
+        self.txt_from_where.setText(from_wh)
+        self.txt_hostname.setText(host)
+        if sender:
+            self.txt_sender.setText(sender)
+        if receiver:
+            self.txt_receiver.setText(receiver)
+
+        # Lock core identifying fields to prevent altering item identity
+        self.cbo_dev_name.setEnabled(False)
+        self.cbo_dev_type.setEnabled(False)
+        self.txt_barcode.setReadOnly(True)
+        self.btn_add_dev_name.setEnabled(False)
+        self.btn_del_dev_name.setEnabled(False)
+        self.btn_add_dev_type.setEnabled(False)
+        self.btn_del_dev_type.setEnabled(False)
+
     def _make_label(self, text):
         lbl = QLabel(text)
         lbl.setStyleSheet("font-weight: bold; color: #3F3F46; font-size: 12px;")
@@ -479,25 +566,20 @@ class StockInDialog(QDialog):
         widget.setStyleSheet("border: 1px solid #D0D5DD; border-radius: 4px; padding: 6px; font-size: 12px; background: white;")
 
     def _recalculate_from_unit(self):
-        """Calculates Total Price when Quantity or Unit Price changes."""
         qty = self.spn_quantity.value()
         unit_price = self.spn_unit_price.value()
-        
         self.spn_total_price.blockSignals(True)
         self.spn_total_price.setValue(qty * unit_price)
         self.spn_total_price.blockSignals(False)
 
     def _recalculate_from_total(self):
-        """Calculates Unit Price when Total Price changes."""
         qty = self.spn_quantity.value()
         total_price = self.spn_total_price.value()
-        
         if qty > 0:
             self.spn_unit_price.blockSignals(True)
             self.spn_unit_price.setValue(total_price / qty)
             self.spn_unit_price.blockSignals(False)
 
-    # --- DEVICE NAME HELPER METHODS ---
     def _populate_device_names(self):
         self.cbo_dev_name.clear()
         try:
@@ -511,10 +593,8 @@ class StockInDialog(QDialog):
             """)
             rows = cursor.fetchall()
             conn.close()
-
             for row in rows:
                 self.cbo_dev_name.addItem(row[0])
-
             self.cbo_dev_name.setCurrentIndex(-1)
         except Exception as e:
             print(f"Failed to load device names: {e}")
@@ -555,8 +635,7 @@ class StockInDialog(QDialog):
         reply = QMessageBox.question(
             self,
             "Remove Option",
-            f"Are you sure you want to remove '{current_text}'?\n\n"
-            f"(This will remove it from the list and clear it from existing records so it won't reappear.)",
+            f"Are you sure you want to remove '{current_text}'?\n\n(This will remove it from the list and clear it from existing records so it won't reappear.)",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -576,7 +655,6 @@ class StockInDialog(QDialog):
             except Exception as e:
                 print(f"Database error clearing DeviceName: {e}")
 
-    # --- DEVICE TYPE HELPER METHODS ---
     def _populate_device_types(self):
         self.cbo_dev_type.clear()
         try:
@@ -590,10 +668,8 @@ class StockInDialog(QDialog):
             """)
             rows = cursor.fetchall()
             conn.close()
-
             for row in rows:
                 self.cbo_dev_type.addItem(row[0])
-
             self.cbo_dev_type.setCurrentIndex(-1)
         except Exception as e:
             print(f"Failed to load device types: {e}")
@@ -634,8 +710,7 @@ class StockInDialog(QDialog):
         reply = QMessageBox.question(
             self,
             "Remove Option",
-            f"Are you sure you want to remove '{current_text}'?\n\n"
-            f"(This will remove it from the list and clear it from existing records so it won't reappear.)",
+            f"Are you sure you want to remove '{current_text}'?\n\n(This will remove it from the list and clear it from existing records so it won't reappear.)",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -688,21 +763,60 @@ class StockInDialog(QDialog):
         try:
             conn = connect_db()
             cursor = conn.cursor()
-            query = """
-                INSERT INTO Inventory 
-                (DeviceName, DeviceType, Quantity, UnitPrice, TotalPrice, Sender, Receiver, ReceiveDate, WarrantyDate, Barcode, TicketNumber, FromWhere, SerialNumber, HostName, Note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
-            cursor.execute(query, (
-                dev_name, dev_type, quantity, unit_price, total_price, sender, receiver, receive_dt,
-                warranty_date, barcode, ticket_num, from_where, serial_num, hostname, notes
-            ))
+
+            # Target ID via explicit attribute or barcode matching fallback
+            target_id = self.item_id
+            if not target_id and barcode:
+                cursor.execute("SELECT ID FROM Inventory WHERE Barcode = ?", (barcode,))
+                row = cursor.fetchone()
+                if row:
+                    target_id = row[0]
+
+            if target_id:
+                query = """
+                    UPDATE Inventory 
+                    SET Quantity = Quantity + ?,
+                        TotalPrice = TotalPrice + ?,
+                        UnitPrice = ?,
+                        Sender = ?,
+                        Receiver = ?,
+                        ReceiveDate = ?,
+                        WarrantyDate = CASE WHEN ? <> '' THEN ? ELSE WarrantyDate END,
+                        TicketNumber = CASE WHEN ? <> '' THEN ? ELSE TicketNumber END,
+                        FromWhere = CASE WHEN ? <> '' THEN ? ELSE FromWhere END,
+                        SerialNumber = CASE WHEN ? <> '' THEN ? ELSE SerialNumber END,
+                        HostName = CASE WHEN ? <> '' THEN ? ELSE HostName END,
+                        Note = CASE WHEN ? <> '' THEN COALESCE(Note, '') || '\n' || ? ELSE Note END
+                    WHERE ID = ?
+                """
+                cursor.execute(query, (
+                    quantity, total_price, unit_price, sender, receiver, receive_dt,
+                    warranty_date, warranty_date,
+                    ticket_num, ticket_num,
+                    from_where, from_where,
+                    serial_num, serial_num,
+                    hostname, hostname,
+                    notes, notes,
+                    target_id
+                ))
+            else:
+                query = """
+                    INSERT INTO Inventory 
+                    (DeviceName, DeviceType, Quantity, UnitPrice, TotalPrice, Sender, Receiver, ReceiveDate, WarrantyDate, Barcode, TicketNumber, FromWhere, SerialNumber, HostName, Note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                cursor.execute(query, (
+                    dev_name, dev_type, quantity, unit_price, total_price, sender, receiver, receive_dt,
+                    warranty_date, barcode, ticket_num, from_where, serial_num, hostname, notes
+                ))
+
             conn.commit()
             conn.close()
 
+            action_type = "STOCK_IN_UPDATE" if target_id else "STOCK_IN"
             audit_details = (
-                f"Stock In: Added {quantity}x '{dev_name}' ({dev_type}) "
-                f"@ ${unit_price:.2f}/unit (Total: ${total_price:.2f}) received from '{sender}'."
+                f"Stock In ({'Updated ID ' + str(target_id) if target_id else 'New Record'}): "
+                f"Added +{quantity}x '{dev_name}' ({dev_type}) @ ${unit_price:.2f}/unit (Added Value: ${total_price:.2f}) from '{sender}'."
             )
             if notes:
                 audit_details += f" Notes: {notes}"
@@ -710,7 +824,7 @@ class StockInDialog(QDialog):
             try:
                 log_audit(
                     username=self.username,
-                    action_type="STOCK_IN",
+                    action_type=action_type,
                     details=audit_details,
                     sender=sender,
                     warranty_date=warranty_date,
@@ -718,31 +832,69 @@ class StockInDialog(QDialog):
                     from_where=from_where
                 )
             except TypeError:
-                log_audit(self.username, "STOCK_IN", audit_details)
+                log_audit(self.username, action_type, audit_details)
 
-            QMessageBox.information(self, "Success", f"Successfully recorded Inbound Stock for {quantity} unit(s).")
+            QMessageBox.information(self, "Success", f"Successfully increased stock by +{quantity} unit(s).")
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to save stock in record:\n{e}")
-
-
 # ==========================================
 # STOCK OUT DIALOG
 # ==========================================
 class StockOutDialog(QDialog):
-    def __init__(self, username="System", is_admin=False, parent=None):
+    def __init__(self, username="System", is_admin=False, parent=None, item_data=None):
         if isinstance(username, QWidget):
             parent = username
             username = getattr(parent, 'username', 'System')
             is_admin = getattr(parent, 'is_admin', False)
-
+            
         super().__init__(parent)
         self.username = username
         self.is_admin = is_admin or self._check_admin_status()
+        self.item_data = item_data or {}
+        
         self.setWindowTitle("Stock Out - Outbound Transaction")
         self.resize(560, 780)
         self.setStyleSheet("QDialog { background-color: #FFFFFF; }")
+        
         self._init_ui()
+        
+        # Instantly prefill data if launched from Complete Record Fields
+        if self.item_data:
+            self._prefill_existing_data()
+
+    def _prefill_existing_data(self):
+        # Safely extract fields
+        def _ext(*keys):
+            for k in keys:
+                if k in self.item_data and self.item_data[k] is not None:
+                    val = str(self.item_data[k]).strip()
+                    return val if val != "-" else ""
+            return ""
+
+        dev_name = _ext("DeviceName", "Device Name", "device_name")
+        dev_type = _ext("DeviceType", "Device Type", "device_type")
+        barcode = _ext("Barcode", "Barcode Number", "barcode")
+        serial = _ext("SerialNumber", "Serial Number", "serial_number")
+
+        idx_name = self.cbo_dev_name.findText(dev_name)
+        if idx_name >= 0:
+            self.cbo_dev_name.setCurrentIndex(idx_name)
+        else:
+            self.cbo_dev_name.setCurrentText(dev_name)
+
+        idx_type = self.cbo_dev_type.findText(dev_type)
+        if idx_type >= 0:
+            self.cbo_dev_type.setCurrentIndex(idx_type)
+        else:
+            self.cbo_dev_type.setCurrentText(dev_type)
+
+        self.txt_barcode.setText(barcode)
+        self.txt_serial_num.setText(serial)
+        
+        # Lock identity fields to speed up user interaction
+        self.cbo_dev_name.setEnabled(False)
+        self.cbo_dev_type.setEnabled(False)
 
     def _check_admin_status(self):
         if self.username == "System":
@@ -860,7 +1012,7 @@ class StockOutDialog(QDialog):
 
         # 4. Sender *
         self.txt_sender = QLineEdit()
-        self.txt_sender.setPlaceholderText("Warehouse officer issuing stock")
+        self.txt_sender.setPlaceholderText("Employee that send the stock")
         self._style_input(self.txt_sender)
 
         # 5. Receiver *
@@ -875,9 +1027,9 @@ class StockOutDialog(QDialog):
         self.dt_send_datetime.setCalendarPopup(True)
         self._style_input(self.dt_send_datetime)
 
-        # 7. Barcode Number *
+        # 7. Barcode Number (Optional)
         self.txt_barcode = QLineEdit()
-        self.txt_barcode.setPlaceholderText("Asset tag or barcode scan")
+        self.txt_barcode.setPlaceholderText("Asset tag or barcode scan (Optional)")
         self._style_input(self.txt_barcode)
 
         # 8. Ticket Number *
@@ -890,9 +1042,9 @@ class StockOutDialog(QDialog):
         self.txt_to_where.setPlaceholderText("Destination branch, department, or office location")
         self._style_input(self.txt_to_where)
 
-        # 10. Serial Number *
+        # 10. Serial Number (Optional)
         self.txt_serial_num = QLineEdit()
-        self.txt_serial_num.setPlaceholderText("Factory serial number")
+        self.txt_serial_num.setPlaceholderText("Factory serial number (Optional)")
         self._style_input(self.txt_serial_num)
 
         # 11. Host Name (Optional)
@@ -913,10 +1065,10 @@ class StockOutDialog(QDialog):
         form_layout.addRow(self._make_label("Sender *"), self.txt_sender)
         form_layout.addRow(self._make_label("Receiver *"), self.txt_receiver)
         form_layout.addRow(self._make_label("Date & Time Sending *"), self.dt_send_datetime)
-        form_layout.addRow(self._make_label("Barcode Number *"), self.txt_barcode)
+        form_layout.addRow(self._make_label("Barcode Number"), self.txt_barcode)
         form_layout.addRow(self._make_label("Ticket Number *"), self.txt_ticket_num)
         form_layout.addRow(self._make_label("To Where *"), self.txt_to_where)
-        form_layout.addRow(self._make_label("Serial Number *"), self.txt_serial_num)
+        form_layout.addRow(self._make_label("Serial Number"), self.txt_serial_num)
         form_layout.addRow(self._make_label("Host Name"), self.txt_hostname)
         form_layout.addRow(self._make_label("Notes"), self.txt_notes)
 
@@ -1119,15 +1271,14 @@ class StockOutDialog(QDialog):
         hostname = self.txt_hostname.text().strip()
         notes = self.txt_notes.toPlainText().strip()
 
+        # 1. Validation - ONLY required fields (Barcode & Serial Number excluded)
         missing_fields = []
         if not dev_name: missing_fields.append("Device Name")
         if not dev_type: missing_fields.append("Device Type")
         if not sender: missing_fields.append("Sender")
         if not receiver: missing_fields.append("Receiver")
-        if not barcode: missing_fields.append("Barcode Number")
         if not ticket_num: missing_fields.append("Ticket Number")
         if not to_where: missing_fields.append("To Where")
-        if not serial_num: missing_fields.append("Serial Number")
 
         if missing_fields:
             QMessageBox.warning(
@@ -1141,25 +1292,38 @@ class StockOutDialog(QDialog):
             conn = connect_db()
             cursor = conn.cursor()
 
-            search_query = """
-                SELECT Id, Quantity FROM Inventory 
-                WHERE LOWER(DeviceName) = LOWER(?) 
-                  AND LOWER(DeviceType) = LOWER(?) 
-                  AND (SerialNumber = ? OR Barcode = ?)
-            """
-            cursor.execute(search_query, (dev_name, dev_type, serial_num, barcode))
+            # 2. Search Inventory:
+            # If serial or barcode is given, match them.
+            # If BOTH are empty, search by Device Name and Device Type alone.
+            if serial_num or barcode:
+                search_query = """
+                    SELECT Id, Quantity FROM Inventory 
+                    WHERE LOWER(DeviceName) = LOWER(?) 
+                      AND LOWER(DeviceType) = LOWER(?) 
+                      AND (
+                          (? <> '' AND SerialNumber = ?) OR 
+                          (? <> '' AND Barcode = ?)
+                      )
+                """
+                cursor.execute(search_query, (dev_name, dev_type, serial_num, serial_num, barcode, barcode))
+            else:
+                search_query = """
+                    SELECT Id, Quantity FROM Inventory 
+                    WHERE LOWER(DeviceName) = LOWER(?) 
+                      AND LOWER(DeviceType) = LOWER(?)
+                """
+                cursor.execute(search_query, (dev_name, dev_type))
+
             row = cursor.fetchone()
 
             if not row:
                 QMessageBox.critical(
                     self, 
                     "Stock Out Error: Item Not Found", 
-                    f"No matching inventory item was found in the database.\n\n"
-                    f"Searched for:\n"
+                    f"No matching inventory item was found in the database for:\n"
                     f"• Device Name: {dev_name}\n"
-                    f"• Device Type: {dev_type}\n"
-                    f"• Serial / Barcode: {serial_num} / {barcode}\n\n"
-                    f"Please verify the entered details."
+                    f"• Device Type: {dev_type}\n\n"
+                    f"Please verify that this item exists in stock."
                 )
                 conn.close()
                 return
@@ -1176,6 +1340,7 @@ class StockOutDialog(QDialog):
                 conn.close()
                 return
 
+            # Deduct quantity or delete row if out of stock
             new_qty = current_qty - quantity
             if new_qty <= 0:
                 cursor.execute("DELETE FROM Inventory WHERE Id = ?", (item_id,))
@@ -1185,9 +1350,10 @@ class StockOutDialog(QDialog):
             conn.commit()
             conn.close()
 
+            # Record audit log
             audit_details = (
                 f"Stock Out: {quantity}x '{dev_name}' ({dev_type}) issued to '{receiver}' "
-                f"at '{to_where}'. Sent by: '{sender}'. Serial: '{serial_num}', Ticket: '{ticket_num}'."
+                f"at '{to_where}'. Sent by: '{sender}'. Serial: '{serial_num or 'N/A'}', Ticket: '{ticket_num}'."
             )
             if notes:
                 audit_details += f" Notes: {notes}"
